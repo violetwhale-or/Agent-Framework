@@ -1,6 +1,6 @@
 # DeepSeek Agent Project
 
-基于 DeepSeek API（OpenAI 兼容协议）构建的个人 AI 助手，支持工具调用、多轮对话持久化、子代理并行执行和语义缓存。
+基于 DeepSeek API（OpenAI 兼容协议）构建的个人 AI 助手，支持工具调用、多轮对话持久化、子代理并行执行和语义缓存。用于Agent各类框架测试和学习
 
 ## 项目结构
 
