@@ -1,4 +1,7 @@
-import json, datetime
+import json 
+import datetime
+import math
+import time
 import subprocess
 import pathlib
 import glob
@@ -102,6 +105,45 @@ class SubagentPool:
         """并行执行多个子任务"""
         with ThreadPoolExecutor(max_workers=len(tasks)) as ex:
             return list(ex.map(self.spawn, tasks))
+        
+
+class SemanticCache:
+    def __init__(self, threshold = 0.85, ttl_seconds = 300):
+        self.entries = []   # 每个元素: {"query": str, "embedding": dict, "response": str, "timestamp": float}
+        self.threshold = threshold
+        self.ttl = ttl_seconds
+
+    def _embed(self, text: str) -> dict:
+        words = text.lower().split()
+        vec = {}
+        for w in words:
+            vec[w] = vec.get(w, 0) + 1
+        norm = math.sqrt(sum(v*v for v in vec.values()))
+        return {k: v/norm for k, v in vec.items()} if norm > 0 else {}
+    
+    def _cosine(self, a: dict, b: dict) -> float:
+        keys = set(a) | set(b)
+        return sum(a.get(k, 0) * b.get(k, 0) for k in keys)
+    
+    def get(self, query: str) -> str | None:
+        q_emb = self._embed(query)
+        now = time.time()
+        for e in self.entries:
+            if now - e["timestamp"] > self.ttl:
+                continue
+            if self._cosine(q_emb, e["embedding"]) >= self.threshold:
+                return e["response"]
+        return None
+    
+    def put(self, query: str, response: str):
+        self.entries.append({
+            "query": query,
+            "embedding": self._embed(query),
+            "response": response,
+            "timestamp": time.time(),
+        })
+        if len(self.entries) > 500:
+            self.entries.pop(0)
 
 
 def read_file_tool(path: str) -> dict:

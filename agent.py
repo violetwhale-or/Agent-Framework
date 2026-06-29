@@ -2,7 +2,7 @@ import os
 import json
 from openai import OpenAI
 from dotenv import load_dotenv
-from tools import build_default_registry, SessionStore, SubagentPool
+from tools import build_default_registry, SessionStore, SubagentPool, SemanticCache
 
 
 class Agent:
@@ -24,6 +24,7 @@ class Agent:
                 "required": ['task']
             }
         )
+        self.cache = SemanticCache(threshold=0.85, ttl_seconds=300)
 
     def run(self, user_input: str, session_id = None) -> str:
         messages = [{"role": "system", "content": self._system_prompt()}]
@@ -34,6 +35,13 @@ class Agent:
 
         if user_input.lower() in ("quit", "exit", "q"):
             return "Quit"
+
+
+        cached = self.cache.get(user_input)
+        if cached:
+            print(cached)
+            self.store.append(session_id, {"role": "assistant", "content": cached})
+            return cached
 
         messages.append({"role": "user", "content": user_input})
         self.store.append(session_id=session_id, turn={"role": "user", "content": user_input})
