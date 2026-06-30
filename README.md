@@ -8,9 +8,8 @@
 Agent_Project/
 ├── agent.py          # Agent 主体：对话循环 + 工具调用 + 记忆恢复
 ├── tools.py          # 基础设施：ToolRegistry / SessionStore / SubagentPool / SemanticCache + 7 个工具函数
-├── chat.py           # 纯对话 demo（无工具能力，阶段 0 产物）
-├── test_all_features.py  # 集成测试脚本
-├── .env              # API 密钥（不提交）
+├── chat.py           # 纯对话 demo（无工具能力，快速验证的demo）
+├── .env              # API 密钥（需要本地创建）
 ├── .gitignore
 └── README.md
 ```
