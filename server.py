@@ -1,4 +1,5 @@
 import json
+import os
 import uuid
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -8,6 +9,9 @@ from sse_starlette.sse import EventSourceResponse
 from dotenv import load_dotenv
 from agentv2 import Agent
 import asyncio
+
+# 让相对路径相对于 server.py 所在目录，而不是运行目录
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 load_dotenv()
 
@@ -28,7 +32,7 @@ sessions: dict[str, str] = {}
 @app.get("/")
 async def root():
     """返回首页 HTML"""
-    with open("index.html", encoding="utf-8") as f:
+    with open(os.path.join(BASE_DIR, "index.html"), encoding="utf-8") as f:
         return HTMLResponse(f.read())
 
 

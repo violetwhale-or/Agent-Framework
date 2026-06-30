@@ -6,17 +6,17 @@
 
 ```
 Agent_Project/
-├── agent.py              # Agent 主体（终端版）：对话循环 + 工具调用 + 记忆恢复
-├── agentv2.py            # Agent 主体（流式版）：run_stream() 生成器，供 server.py 调用，含 MCP 集成
-├── tools.py              # 基础设施：ToolRegistry + 7 个工具函数 + SessionStore + SubagentPool + SemanticCache
+├── agent.py              # Agent 主体：对话循环 + 工具调用 + 记忆恢复
+├── agentv2.py            # Agent 主体（MCP集成）：run_stream() 生成器，供 server.py 调用，含 MCP 集成
+├── tools.py              # 基础设施：ToolRegistry（工具注册） + 7 个工具函数 + SessionStore + SubagentPool + SemanticCache
 ├── mcp_client.py         # MCP 客户端：同步 subprocess 实现，自行拼 JSON-RPC 报文
 ├── mcp_manager.py        # MCP 管理器：多服务器发现、工具前缀路由、同步调用
 ├── server.py             # FastAPI 服务：SSE 流式端点、多会话管理
 ├── index.html            # Web 聊天界面：深色主题、Markdown 渲染、多会话切换
-├── chat.py               # 纯对话 demo（无工具能力，阶段 0 产物）
+├── chat.py               # 纯对话 demo（无工具能力，demo快速验证）
 ├── test_all_features.py  # 集成测试脚本（19 项覆盖全部功能）
 ├── requirements.txt      # 精确版本依赖
-├── .env                  # API 密钥（不提交）
+├── .env                  # API 密钥（需要本地创建）
 ├── .gitignore
 └── README.md
 ```
