@@ -3,7 +3,7 @@ import json
 from openai import OpenAI
 from dotenv import load_dotenv
 from typing import Generator
-from tools import ToolRegistry, SessionStore, SubagentPool, SemanticCache
+from tools import build_default_registry, SessionStore, SubagentPool, SemanticCache
 from mcp_manager import MCPManager, MCPServerConfig
 
 
@@ -11,7 +11,7 @@ class Agent:
     def __init__(self, max_turns: int = 15):
         self.client = OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
         self.max_turns = max_turns
-        self.registry = ToolRegistry()
+        self.registry = build_default_registry()
         self.store = SessionStore("agent_sessions.json")
         self.subagent_pool = SubagentPool(self)
         self.registry.register(
@@ -126,6 +126,9 @@ class Agent:
             "- 用工具获取实际信息，不要猜测文件内容\n"
             "- 完成用户请求后直接回复，不要额外调用工具\n"
             "- 如果 shell 命令返回错误，读报错信息，不要凭空猜测"
+            "- 调用 rag_query 工具后，检查返回的内容是否与问题相关。\n"
+            "  如果相关则基于知识回答；如果不相关则用自己的知识回答。\n"
+            "  不要编造知识库中不存在的信息。\n"
         )
     
     def _run_loop(self, user_message: str, system_prompt: str = None) -> str:
@@ -197,6 +200,7 @@ class Agent:
             args=["-y", "@modelcontextprotocol/server-filesystem", allowed_dir],
         ))
 
+        # Notion 需要 API Key，可能卡住——放在 filesystem 后面连
         self.mcp.add_server(MCPServerConfig(
             name="notion",
             command="npx",

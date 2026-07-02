@@ -8,6 +8,7 @@ import glob
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor
+from rag_tool import rag_query
 
 class ToolRegistry:
     def __init__(self):
@@ -339,4 +340,22 @@ def build_default_registry() -> ToolRegistry:
             "required": ["query"]   # 只有 query 是必填，因为 path 有默认值
         }
     )
+
+    r.register(
+        "rag_query",
+        rag_query,
+        "从知识库中检索与问题语义相似的原始文本段落（不调 LLM 生成）。"
+        "返回多段文本，由主 LLM 自行判断是否采用。未匹配时返回「未找到相关信息」。",
+        {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "要搜索的问题字符串"
+                },
+            },
+            "required": ["query"]   # 只有 query 是必填，因为 path 有默认值
+        }
+    )
+
     return r
