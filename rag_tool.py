@@ -5,72 +5,131 @@ rag_tool.py — RAG 检索工具（懒加载版）
 启动阶段不影响 agent 初始化速度。
 """
 
+import os
 import chromadb
+import pickle
 from sentence_transformers import SentenceTransformer
 
-# ── 全局变量：第一次调用时初始化 ──
+
 _model = None
 _collection = None
+db_path = "./rag_data"
+_bm25_data = None
+_reranker = None
 
 
 def _ensure_initialized():
-    """第一次调用时加载模型和知识库"""
-    global _model, _collection
+    global _model, _collection, _bm25_data
     if _model is not None:
         return
+
+    if not os.path.exists(os.path.join(db_path, "chroma.sqlite3")):
+        raise FileNotFoundError(
+            f"知识库不存在: {db_path}/chroma.sqlite3\n"
+            f"请先运行: python build_knowledge.py <文档路径>"
+        )
 
     print("🔄 [RAG] 首次加载嵌入模型...")
     _model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
 
-    docs = [
-        "ReAct 循环是 Thought → Action → Observation 的交替过程",
-        "ChromaDB 是一个轻量级向量数据库，无需独立服务器即可运行",
-        "Python 是一种解释型、面向对象的编程语言",
-    ]
-    doc_vectors = _model.encode(docs)
-    client_db = chromadb.PersistentClient(path="./rag_data")
-    _collection = client_db.get_or_create_collection("knowledge")
-    _collection.add(
-        ids=["0", "1", "2"],
-        embeddings=doc_vectors.tolist(),
-        documents=docs,
-    )
+    client_db = chromadb.PersistentClient(db_path)
+    _collection = client_db.get_collection("knowledge")
+
+    bm25_path = os.path.join(db_path, "bm25_index.pkl")
+    if os.path.exists(bm25_path):
+        with open(bm25_path, "rb") as f:
+            _bm25_data = pickle.load(f)
+        print(f"✅ BM25 索引已加载（{len(_bm25_data['texts'])} 条）")
+
     print("✅ [RAG] 知识库初始化完成")
 
 
 def rag_query(query: str) -> str:
-    """从知识库检索相关段落，返回原始文本（不调 LLM，让主 Agent 自行判断）"""
     _ensure_initialized()
-
-    # ① 嵌入问题
     q_vec = _model.encode(query)
 
-    # ② 检索（返回多条，方便筛选）
-    results = _collection.query(
-        query_embeddings=[q_vec.tolist()],   # ✅ numpy → list
-        n_results=3,
-        include=["documents", "distances"],
+    # 向量检索
+    vector_results = _collection.query(
+        query_embeddings=[q_vec.tolist()],
+        n_results=10,
+        include=["documents", "distances", "metadatas"],
     )
 
-    docs = results["documents"][0]
-    distances = results["distances"][0]
+    # 建立 text → source 映射（优先用 BM25，回退到向量元数据）
+    source_from_text = {}
+    if _bm25_data is not None:
+        for idx, t in enumerate(_bm25_data["texts"]):
+            src = ""
+            if idx < len(_bm25_data["titles"]):
+                src = _bm25_data["titles"][idx].get("source", "")
+            source_from_text[t] = src
+    else:
+        vector_metas = vector_results["metadatas"][0]
+        for idx, doc_text in enumerate(vector_results["documents"][0]):
+            src = ""
+            if idx < len(vector_metas) and vector_metas[idx]:
+                src = vector_metas[idx].get("source", "")
+            source_from_text[doc_text] = src
 
-    # ③ 阈值筛选：只保留距离 ≤ 0.7 的
-    useful = []
-    for i in range(len(docs)):
-        if distances[i] <= 0.5:
-            useful.append(docs[i])
-        elif distances[i] <= 0.7:
-            useful.append(docs[i] + "（相似度较弱）")
-        # > 0.7 丢弃
+    # RRF 合并排名
+    rrf_scores = {}
+    for rank, doc_text in enumerate(vector_results["documents"][0]):
+        rrf_scores[doc_text] = rrf_scores.get(doc_text, 0) + 1 / (60 + rank)
 
+    if _bm25_data is not None:
+        tokenized_query = query.split()
+        bm25_scores = _bm25_data["bm25"].get_scores(tokenized_query)
+        bm25_top10 = sorted(
+            enumerate(bm25_scores), key=lambda x: x[1], reverse=True
+        )[:10]
+        for rank, (doc_id, _) in enumerate(bm25_top10):
+            doc_text = _bm25_data["texts"][doc_id]
+            rrf_scores[doc_text] = rrf_scores.get(doc_text, 0) + 1 / (60 + rank)
+
+    # 取 Top3
+    final_rank = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:3]
+    useful = [text for text, _ in final_rank]
     if not useful:
-        return "（知识库中未找到相关信息）"
+        return "（未检索到相关信息）"
 
-    return "\n---\n".join(useful)
+    # Rerank（数据量 > 1000 时启用）
+    if _bm25_data is not None and len(_bm25_data["texts"]) > 1000:
+        _load_reranker()
+        if _reranker is not None:
+            pairs = [(query, text) for text in useful]
+            rerank_scores = _reranker.predict(pairs)
+            reranked = sorted(
+                zip(useful, rerank_scores),
+                key=lambda x: x[1], reverse=True
+            )
+            useful = [text for text, _ in reranked]
+
+    # 拼接结果
+    final = []
+    for text in useful:
+        source = source_from_text.get(text, "")
+        tag = f"({source})" if source else ""
+        final.append(f"{tag} {text}".strip())
+
+    return "\n\n---\n\n".join(final)
 
 
-# ── 测试（只有直接运行此文件时才执行）──
+def _load_reranker():
+    """首次调用时才加载 Rerank 模型（2.27GB）"""
+    global _reranker
+    if _reranker is not None:
+        return
+    from sentence_transformers import CrossEncoder
+    import torch
+    print("🔄 [Rerank] 加载重排序模型（首次加载较慢）...")
+    _reranker = CrossEncoder(
+        "BAAI/bge-reranker-v2-m3",
+        max_length=512,
+        device="cuda" if torch.cuda.is_available() else "cpu",
+    )
+    print(f"✅ [Rerank] 加载完成（设备: {_reranker.device}）")
+
+
 if __name__ == "__main__":
-    result = rag_query("什么是 ReAct 循环？")
+    result = rag_query("Qwen_Proxy 应该怎么使用部署？")
     print(f"RAG 检索结果:\n{result}")

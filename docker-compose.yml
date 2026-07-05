@@ -1,0 +1,16 @@
+services:
+  agent:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - HF_ENDPOINT=https://hf-mirror.com
+    volumes:
+      - ./rag_data:/app/rag_data
+      - ./agent_sessions.json:/app/agent_sessions.json
+      - hf_cache:/root/.cache/huggingface
+
+volumes:
+  hf_cache:

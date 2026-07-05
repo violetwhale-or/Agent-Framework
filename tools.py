@@ -344,8 +344,8 @@ def build_default_registry() -> ToolRegistry:
     r.register(
         "rag_query",
         rag_query,
-        "从知识库中检索与问题语义相似的原始文本段落（不调 LLM 生成）。"
-        "返回多段文本，由主 LLM 自行判断是否采用。未匹配时返回「未找到相关信息」。",
+        "从知识库检索并返回知识库内有关片段，用户问出问题时先检索知识库，若有匹配知识则将知识一起纳入思考给出回答。"
+        "返回字符串包含根据问题寻找到具有一定相似程度的文本。",
         {
             "type": "object",
             "properties": {
@@ -354,7 +354,7 @@ def build_default_registry() -> ToolRegistry:
                     "description": "要搜索的问题字符串"
                 },
             },
-            "required": ["query"]   # 只有 query 是必填，因为 path 有默认值
+            "required": ["query"]   
         }
     )
 
