@@ -96,8 +96,9 @@ pip install -r requirements.txt
 # 国内用户需设置镜像
 export HF_ENDPOINT=https://hf-mirror.com
 
-# 从 .md 文档构建知识库
-python build_knowledge.py RAG_learning/Qwen-Proxy.md
+# 从 .md 文档构建知识库 目前知识库构建需要Markdown文档
+# 你可以使用任意数量的文档构建属于你自己的知识库
+python build_knowledge.py your_doc.md
 ```
 
 产物存储在 `./rag_data/`（chroma.sqlite3 + bm25_index.pkl）。后续再次启动 agent 时自动加载。
