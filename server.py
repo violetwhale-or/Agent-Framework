@@ -27,7 +27,20 @@ app.add_middleware(
 
 agent = Agent(max_turns=15)
 
-sessions: dict[str, str] = {}
+SESSIONS_FILE = os.path.join(BASE_DIR, "sessions_index.json")
+
+def _load_sessions() -> dict[str, str]:
+    try:
+        with open(SESSIONS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+def _save_sessions(s: dict[str, str]):
+    with open(SESSIONS_FILE, "w", encoding="utf-8") as f:
+        json.dump(s, f, ensure_ascii=False)
+
+sessions: dict[str, str] = _load_sessions()
 
 @app.get("/")
 async def root():
@@ -38,12 +51,21 @@ async def root():
 
 @app.get("/api/sessions")
 async def list_sessions():
-    """返回所有会话列表"""
+    """返回所有会话列表（含首条消息预览）"""
     if not sessions:
-        # 默认创建一个会话
         sid = str(uuid.uuid4())[:8]
         sessions[sid] = "新对话"
-    return {"sessions": [{"id": k, "name": v} for k, v in sessions.items()]}
+        _save_sessions(sessions)
+    result = []
+    for sid, name in sessions.items():
+        history = agent.store.load(sid)
+        preview = ""
+        for msg in history:
+            if msg.get("role") == "user":
+                preview = msg["content"][:30]
+                break
+        result.append({"id": sid, "name": name, "preview": preview})
+    return {"sessions": result}
 
 
 @app.post("/api/sessions")
@@ -51,7 +73,15 @@ async def create_session():
     """创建新会话"""
     sid = str(uuid.uuid4())[:8]
     sessions[sid] = f"对话 {len(sessions) + 1}"
+    _save_sessions(sessions)
     return {"session_id": sid, "name": sessions[sid]}
+
+
+@app.get("/api/sessions/{session_id}/history")
+async def get_session_history(session_id: str):
+    """返回指定会话的历史消息列表"""
+    history = agent.store.load(session_id)
+    return {"messages": history}
 
 
 @app.post("/chat/{session_id}")
@@ -65,6 +95,7 @@ async def chat(session_id: str, request: Request):
 
     if session_id not in sessions:
         sessions[session_id] = f"对话 {len(sessions) + 1}"
+        _save_sessions(sessions)
 
     async def event_generator():
         """把 agent.run_stream() 的 yield 包装成 SSE 事件"""

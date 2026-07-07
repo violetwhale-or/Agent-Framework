@@ -6,24 +6,34 @@
 
 ```
 NN_text1/
+├── .env                   # API 密钥（需自行创建）
 ├── agentv2.py             # Agent 主体：MCP + 工具注册 + 流式生成器
-├── agent.py               # Agent 主体（纯本地工具）
-├── chat.py                # Agent 对话demo（纯本地工具）
-├── tools.py               # ToolRegistry + 9 个工具函数 + SessionStore + SubagentPool + SemanticCache
-├── rag_tool.py            # RAG 检索：混合检索（语义+BM25）+ RRF 合并
-├── build_knowledge.py     # 知识库构建：md 读取 → 递归切片 → 编码 → 向量库 + BM25 索引
+├── agent_sessions.json    # Agent 上下文存储，可以记录多会话记录并提供对话恢复基础
+├── build_knowledge.py     # 知识库构建：md 读取 → 切片 → 编码 → 向量库 + BM25 索引
+├── docker-compose.yml     # 一键部署
+├── Dockerfile             # 容器化镜像
+├── index.html             # Web 聊天页面：深色主题、多会话切换
 ├── mcp_client.py          # MCP 客户端：同步 subprocess，手动 JSON-RPC
 ├── mcp_manager.py         # MCP 管理器：多服务器发现、前缀路由
-├── server.py              # FastAPI 服务：SSE 流式端点、多会话管理
-├── index.html             # Web 聊天页面：深色主题、多会话切换
-├── Dockerfile             # 容器化镜像
-├── docker-compose.yml     # 一键部署
+├── rag_data/              # 本地知识库，使用 build_knowledge.py 构建
+├── rag_tool.py            # RAG 检索：混合检索（语义+BM25）+ RRF 合并
+├── README.md              # 项目说明
 ├── requirements.txt       # Python 依赖
-├── .env                   # API 密钥（需自行创建）
-└── README.md
+├── server.py              # FastAPI 服务：SSE 流式端点、多会话管理
+├── sessions_index.json    # 界面多会话分支存储：提供本地多对话记录、恢复基础
+└── tools.py               # ToolRegistry + 工具函数 + SessionStore + SubagentPool + SemanticCache
 ```
 
-## 已实现的能力
+### 架构流程
+
+```mermaid
+graph LR
+    Input["用户输入"] --> Agent["Agent 引擎"]
+    Agent -->|工具调用| Tools["本地工具 / RAG / MCP"]
+    Tools -->|结果回馈| Agent
+    Agent -->|最终输出| UI["Web 界面"]
+    UI -->|记录上下文| Store["agent_sessions.json"]
+```
 
 ### 核心循环（agentv2.py）
 
@@ -34,6 +44,10 @@ NN_text1/
 - **MCP 集成**：自动发现并注册社区 MCP 服务器工具，多服务器共存
 - **子代理**：通过 `subagent_task` 暴露给模型，支持独立上下文 + 并行执行
 - **RAG 混合检索**：向量语义检索 + BM25 关键词检索 + RRF 合并
+- **MCP 按需启用**：通过 `/mcp on` / `/mcp off` 命令在对话中控制 MCP 工具开关
+- **网络搜索**：`web_fetch` 工具支持获取 URL 内容，内置 trafilatura 正文提取 + 正则去标签双重保障
+- **文件写入保护**：`write_file_tool` 改为两步确认，先返回预览，用户同意后调用 `confirm_write` 执行
+- **轮次上限强制输出**：最后一轮自动设置 `tool_choice="none"`，确保 LLM 必定输出最终回答
 
 ### 工具系统
 
@@ -42,14 +56,15 @@ NN_text1/
 | 工具名 | 功能 |
 |--------|------|
 | `calculator` | 安全数学表达式计算 |
-| `get_weather_tool` | 模拟天气查询 |
-| `read_file_tool` | 读取文件内容 |
-| `write_file_tool` | 写入文件，自动创建父目录 |
-| `shell_tool` | 执行 shell 命令（含危险命令黑名单） |
-| `search_files_tool` | 按通配符搜索文件名 |
+| `confirm_write` | 确认并执行待写入操作（配合 write_file_tool 两步确认） |
 | `grep_tool` | 在 .py/.ts/.md 中搜索文本 |
-| `subagent_task` | 启动子代理执行独立任务 |
 | `rag_query` | 混合检索知识库（向量 + BM25 + RRF） |
+| `read_file_tool` | 读取文件内容 |
+| `search_files_tool` | 按通配符搜索文件名 |
+| `shell_tool` | 执行 shell 命令（含危险命令黑名单） |
+| `subagent_task` | 启动子代理执行独立任务 |
+| `web_fetch` | 获取网页内容并提取正文（trafilatura 清洗 HTML） |
+| `write_file_tool` | 写入文件（需用户确认后执行） |
 
 #### MCP 工具（mcp_client.py / mcp_manager.py）
 
@@ -90,15 +105,20 @@ pip install -r requirements.txt
 
 ## 运行方式
 
+### 0. 安装依赖
+
+```bash
+pip install -r requirements.txt
+```
+
 ### 1. 构建知识库（首次运行前执行）
 
 ```bash
 # 国内用户需设置镜像
 export HF_ENDPOINT=https://hf-mirror.com
 
-# 从 .md 文档构建知识库 目前知识库构建需要Markdown文档
-# 你可以使用任意数量的文档构建属于你自己的知识库
-python build_knowledge.py your_doc.md
+# 从 .md 文档构建知识库
+python build_knowledge.py RAG_learning/Qwen-Proxy.md
 ```
 
 产物存储在 `./rag_data/`（chroma.sqlite3 + bm25_index.pkl）。后续再次启动 agent 时自动加载。
@@ -121,12 +141,42 @@ python server.py
 
 ### 4. Docker 部署
 
+#### 方式一：从 Docker Hub 拉取（推荐）
+
+```bash
+# 拉取镜像
+docker pull violet/dev_agent:0.1.1
+
+# 准备数据目录
+mkdir -p ./rag_data
+
+# 启动容器
+docker compose up -d
+```
+
+#### 方式二：本地构建
+
 ```bash
 docker compose build
 docker compose up -d
 ```
 
 访问 `http://localhost:8000`。
+
+首次启动时需构建知识库：
+
+```bash
+# 方法一：宿主机有 Python 环境时直接构建
+export HF_ENDPOINT=https://hf-mirror.com
+python build_knowledge.py ./docs/
+
+# 方法二：通过容器构建（宿主机无需 Python）
+docker compose run --rm \
+  -v ./docs:/app/docs \
+  -v ./rag_data:/app/rag_data \
+  -e HF_ENDPOINT=https://hf-mirror.com \
+  agent python build_knowledge.py /app/docs/
+```
 
 ### 5. 检索效果评估
 
@@ -135,6 +185,16 @@ python eval_rag.py
 ```
 
 输出 Recall@K 指标。
+
+### 6. 对话控制命令
+
+在对话中输入以下命令控制 Agent 行为：
+
+| 命令 | 作用 |
+|------|------|
+| `/mcp on` | 启用 MCP 工具（filesystem + notion） |
+| `/mcp off` | 禁用 MCP 工具，切换为本地工具 |
+| `/help` 或 `/h` | 显示可用命令列表 |
 
 ## 环境变量
 
@@ -155,7 +215,28 @@ DEEPSEEK_API_KEY=sk-your-key-here
 
 ## 版本记录
 
-### v2.2 — 混合检索 + 部署（当前版本）
+### v2.3 — 网络搜索 + 对话控制 + 写入保护（当前版本）
+
+**新增文件：** `Agent实际问题记录.md`
+
+**能力提升：**
+- `web_fetch` 工具：获取 URL 网页内容，内置 trafilatura 正文提取 + 正则去标签双重保障
+- MCP 按需启用：通过 `/mcp on`/`/mcp off` 命令在对话中控制工具开关
+- 文件写入保护：`write_file_tool` 改为两步确认，先返回预览，用户同意后调用 `confirm_write` 执行
+- 内容清洗：`web_fetch` 返回纯正文而非原始 HTML，减少 LLM 噪音
+- 轮次上限强制输出：最后一轮自动禁止工具调用，确保 LLM 输出最终回答
+- MCP 全局二进制检测：自动判断容器内全局包 / 本地 npx，优化连接速度
+- `ToolRegistry` 新增 `remove()` 方法，支持运行时注销工具
+- 部署效果优化：优化部署后工具载入、调用流程，并上传仓库方便拉取
+
+**依赖新增：**
+- `trafilatura` — 网页正文提取
+- `lxml[html-clean]` — trafilatura 依赖
+
+
+---
+
+### v2.2 — 混合检索 + 部署
 
 **新增文件：**
 - `build_knowledge.py` — 独立知识库构建工具（递归切片 + 编码 + 向量库 + BM25 索引）
@@ -171,9 +252,6 @@ DEEPSEEK_API_KEY=sk-your-key-here
 **依赖新增：**
 - `rank-bm25` — BM25 倒排索引检索
 
-**注意事项：**
-- 此版本涉及到Docker部署所以需要Linux （[配置教程](https://github.com/violetwhale-or/Using-AMD-GPU-with-PyTorch-on-Windows-and-WSL2)）环境进行尝试，除此之外windows环境支持运行
-
 ---
 
 ### v2.1 — RAG 知识库集成
@@ -182,58 +260,50 @@ DEEPSEEK_API_KEY=sk-your-key-here
 
 **能力提升：**
 - Agent 新增 `rag_query` 工具，支持知识库语义检索
-- 模型延迟加载，启动不阻塞，首次调用工具时才加载
-- 返回原文而非 LLM 生成结果，主 LLM 自行判断相关度
+- 模型延迟加载，启动不阻塞
 - 距离阈值（≤ 0.7 保留）自动过滤不相关内容
-
-**依赖新增：**
-- sentence-transformers — 本地嵌入模型
-- chromadb — 向量数据库
-
-**注意事项：**
-- RAG的集成表示需要安装 pytorch 等神经网络训练相关的库
-- 最好能够使用带有 NVIDIA GPU 的 PC 主机进行尝试
-- AMD GPU 的 PC 主机可以尝试使用 WSL2 ，启用 Linux 环境进行运行 [配置教程](https://github.com/violetwhale-or/Using-AMD-GPU-with-PyTorch-on-Windows-and-WSL2)
-- 也可以安装 CPU 版本的 pytorch 进行尝试
 
 ---
 
 ### v2.0 — MCP 集成
 
-**新增文件：** `mcp_client.py`、`mcp_manager.py`
-
 **能力提升：**
-- 工具数从 8 个扩展到 8 + N 个
-- 已接入 filesystem（14 工具）+ notion（24 工具），共 38 个 MCP 工具
-- 工具名前缀防止多服务器冲突
-
-**解决的关键问题：**
-- 放弃 asyncio 方案（Windows 兼容性），最终采用同步 subprocess + 手动 JSON-RPC
+- 工具数从 8 个扩展到 38 个（filesystem + notion）
+- 同步 subprocess + 手动 JSON-RPC 实现 MCP 协议，零 async/anyio 依赖
+- 多服务器自动发现、工具名前缀路由，防止命名冲突
+- 解决 Windows 上 async cancel scope 崩溃问题，最终采用同步方案
 
 ---
 
 ### v1.3 — Web 界面
 
-**新增文件：** `server.py`、`index.html`
-
 **能力提升：**
-- 终端 → HTTP 服务，浏览器访问 `http://localhost:8000`
-- SSE 流式推送 + 缓冲区机制
+- 从终端交互升级为 HTTP 服务，浏览器访问 `http://localhost:8000`
+- SSE 流式推送 + 缓冲区机制（标点断句 / 50 字兜底）
+- 深色主题 Markdown 渲染、多会话切换
 
 ---
 
 ### v1.2 — 语义缓存 + 子代理
 
-**新增：** `SemanticCache`、`SubagentPool`
+**能力提升：**
+- `SemanticCache`：词袋嵌入 + 余弦相似度，命中时跳过 API 调用
+- `SubagentPool`：独立上下文子代理 + ThreadPoolExecutor 并行执行
+- 修复 assistant(tool_calls) 存入 SessionStore 时的序列化问题
 
 ---
 
 ### v1.1 — 会话持久化
 
-**新增：** `SessionStore`、`session_id` 参数
+**能力提升：**
+- `SessionStore`：JSON 文件持久化，跨轮次记忆恢复
+- `run()` / `run_stream()` 接收 `session_id` 参数，支持多会话隔离
 
 ---
 
 ### v1.0 — 初版
 
-基础 ReAct 循环 + 8 个手写工具 + `ToolRegistry`
+**能力提升：**
+- 基础 ReAct 循环，支持 8 个手写工具
+- `ToolRegistry`：工具注册、dispatch、JSON Schema 自动生成
+- 终端交互模式，支持多轮对话

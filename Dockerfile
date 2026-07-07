@@ -11,13 +11,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# 安装 Node.js 并全局安装 MCP 服务器包
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nodejs npm \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g @modelcontextprotocol/server-filesystem @notionhq/notion-mcp-server
+
 # 复制项目代码
 COPY . .
 
-# 持久化知识库和会话数据
-VOLUME ["/app/rag_data", "/app/agent_sessions.json"]
+# 持久化知识库
+VOLUME ["/app/rag_data"]
 
 EXPOSE 8000
 
 CMD ["python", "server.py"]
-

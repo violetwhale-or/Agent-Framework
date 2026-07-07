@@ -8,6 +8,11 @@ import glob
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor
+import httpx
+from urllib.parse import quote
+
+# 待确认的写入操作
+_pending_writes: list[dict] = []
 from rag_tool import rag_query
 
 class ToolRegistry:
@@ -42,6 +47,9 @@ class ToolRegistry:
     
     def list_tools(self) -> list[str]:
         return list(self._tools.keys())
+
+    def remove(self, name: str):
+        self._tools.pop(name, None)
     
 
 @dataclass
@@ -62,7 +70,7 @@ class SessionStore:
         try:
             with open(self.path, encoding="utf-8") as f:
                 self._sessions = json.load(f)
-        except FileNotFoundError:
+        except (FileNotFoundError, json.JSONDecodeError):
             self._sessions = {}
 
     def _save(self):
@@ -160,12 +168,64 @@ def read_file_tool(path: str) -> dict:
         return {"error": str(e)}
 
 def write_file_tool(path: str, content: str) -> dict:
-    """写入文件"""
+    """写入文件（需用户确认后才真正写入）"""
+    global _pending_writes
+    # 限制写入路径在当前项目内
+    allowed = pathlib.Path(".").resolve()
+    target = pathlib.Path(path).resolve()
+    try:
+        target.relative_to(allowed)
+    except ValueError:
+        return {"error": f"禁止写入项目目录之外的路径: {path}"}
 
-    p = pathlib.Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content)
-    return {"path": str(p), "bytes_written": len(content)}
+    # 不直接写入，加入待确认队列
+    _pending_writes.append({
+        "id": len(_pending_writes),
+        "path": str(target),
+        "content": content,
+        "preview": content[:200],
+    })
+    return {
+        "status": "pending",
+        "message": f"等待用户确认写入文件 {target.name}。"
+                      f"内容预览（前200字）:\n{content[:200]}",
+        "write_id": len(_pending_writes) - 1,
+    }
+
+
+def confirm_write_tool(write_id: int) -> dict:
+    """确认并执行待写入操作"""
+    global _pending_writes
+    for w in _pending_writes:
+        if w["id"] == write_id:
+            p = pathlib.Path(w["path"])
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(w["content"])
+            _pending_writes.remove(w)
+            return {"status": "ok", "path": w["path"], "bytes_written": len(w["content"])}
+    return {"error": f"未找到待确认的写入操作: {write_id}"}
+
+
+def web_fetch_tool(url: str) -> dict:
+    """获取网页内容并提取正文"""
+    try:
+        resp = httpx.get(url, timeout=15, follow_redirects=True,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        resp.encoding = "utf-8"
+        # 提取正文（去标签、去导航、去广告）
+        try:
+            import trafilatura
+            text = trafilatura.extract(resp.text)
+        except Exception:
+            text = None
+        if not text:
+            # trafilatura 提取失败时，手动去 HTML 标签
+            import re
+            text = re.sub(r'<[^>]+>', '', resp.text)
+            text = re.sub(r'\s+', ' ', text).strip()
+        return {"url": url, "content": text[:5000], "status": resp.status_code}
+    except Exception as e:
+        return {"error": str(e)}
 
 def shell_tool(command: str) -> dict:
     """运行 shell 命令（带安全限制）"""
@@ -195,16 +255,6 @@ def calculator(expression: str) -> dict:
         return {"expression": expression, "result": result}
     except Exception as e:
         return {"error": str(e)}
-
-def get_weather_tool(city: str) -> Dict[str, Any]:
-    # 模拟数据（仅供测试）
-    return {
-        "city": city,
-        "temperature": 22.5,
-        "condition": "晴",
-        "humidity": 65,
-        "wind_speed": 12.0
-    }
 
 def search_files_tool(pattern: str, path: str = ".") -> dict:
     '''搜索文件名，输入pattern和path字符串，返回是字典格式'''
@@ -243,7 +293,9 @@ def build_default_registry() -> ToolRegistry:
     r.register(
         "write_file_tool",
         write_file_tool,
-        "将内容写入指定文件，自动创建父目录。返回包含文件路径(path)和写入字节数(bytes_written)的字典。",
+        "将内容写入指定文件（需用户确认后才执行）。"
+        "调用此工具后会返回 write_id，请先向用户展示写入内容预览并询问是否同意。"
+        "用户同意后再调用 confirm_write 工具传入 write_id 执行实际写入。",
         {
             "type": "object",
             "properties": {
@@ -277,24 +329,6 @@ def build_default_registry() -> ToolRegistry:
                 "expression": {"type": "string", "description": "数学表达式，例如 '2 + 3 * 4'"}
             },
             "required": ["expression"]
-        }
-    )
-
-    r.register(
-        "get_weather_tool",                    
-        get_weather_tool,                    
-        "获取指定城市的实时天气信息（温度、天气状况、湿度、风速）。"  
-        "返回字典包含 city, temperature(°C), condition, humidity(%), wind_speed(km/h)。"
-        "如果请求失败，返回包含 error 字段的字典。",
-        {
-            "type": "object",
-            "properties": {
-                "city": {
-                    "type": "string",
-                    "description": "城市名称，支持中文或英文，例如 '上海' 或 'Shanghai'"
-                }
-            },
-            "required": ["city"]              
         }
     )
 
@@ -355,6 +389,41 @@ def build_default_registry() -> ToolRegistry:
                 },
             },
             "required": ["query"]   
+        }
+    )
+
+    r.register(
+        "confirm_write",
+        confirm_write_tool,
+        "确认并执行待写入操作。调用 write_file_tool 后必须先取得用户同意，再调用此工具执行写入。"
+        "参数 write_id 来自 write_file_tool 返回的 write_id 字段。",
+        {
+            "type": "object",
+            "properties": {
+                "write_id": {
+                    "type": "integer",
+                    "description": "待确认的写入操作 ID"
+                },
+            },
+            "required": ["write_id"]
+        }
+    )
+
+    r.register(
+        "web_fetch",
+        web_fetch_tool,
+        "获取指定 URL 的网页文本内容，返回网页正文前 5000 字。"
+        "当用户提问明显具有时效性的信息时，使用此工具读取网络上最新的信息。"
+        "当你首先听到需要专业知识时，搜索知识库没有信息则使用此工具在网络上搜索",
+        {
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "要获取的网页完整 URL"
+                },
+            },
+            "required": ["url"]
         }
     )
 

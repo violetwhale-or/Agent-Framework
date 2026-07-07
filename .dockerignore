@@ -1,0 +1,13 @@
+__pycache__
+.venv
+.env
+*.pkl
+rag_data
+.vscode
+.git
+RAG_learning
+leetcode
+*.md
+agent_sessions.json
+sessions_index.json
+

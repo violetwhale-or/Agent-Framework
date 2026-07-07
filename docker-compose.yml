@@ -10,7 +10,5 @@ services:
     volumes:
       - ./rag_data:/app/rag_data
       - ./agent_sessions.json:/app/agent_sessions.json
-      - hf_cache:/root/.cache/huggingface
-
-volumes:
-  hf_cache:
+      - ./sessions_index.json:/app/sessions_index.json
+      - /home/zhong/.cache/huggingface:/root/.cache/huggingface

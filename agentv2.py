@@ -1,5 +1,6 @@
 import os
 import json
+import shutil
 from openai import OpenAI
 from dotenv import load_dotenv
 from typing import Generator
@@ -29,14 +30,89 @@ class Agent:
         self.cache = SemanticCache(threshold=0.85, ttl_seconds=300)
 
         self.mcp = MCPManager()
-        self._connect_mcp_servers()
+        self._mcp_ready = False
+        self._mcp_enabled = False
+        self._mcp_tool_names: list[str] = []
+        self._mcp_tool_defs: list[dict] = []
+
+    def _connect_mcp_servers(self):
+        allowed_dir = os.path.abspath(".")
+
+        def _resolve(cmd: str, pkg: str, args: list[str]):
+            if shutil.which(cmd):
+                return cmd, args
+            return "npx", ["-y", pkg] + args
+
+        fs_cmd, fs_args = _resolve("mcp-server-filesystem",
+            "@modelcontextprotocol/server-filesystem", [allowed_dir])
+        self.mcp.add_server(MCPServerConfig("filesystem", fs_cmd, fs_args))
+
+        nn_cmd, nn_args = _resolve("notion-mcp-server",
+            "@notionhq/notion-mcp-server", [])
+        self.mcp.add_server(MCPServerConfig("notion", nn_cmd, nn_args))
+
+        self.mcp.connect_all()
+
+        self._mcp_tool_names = []
+        self._mcp_tool_defs = []
+        for tool in self.mcp.get_all_tools():
+            tool_name = tool["name"]
+            self._mcp_tool_names.append(tool_name)
+            def make_dispatch(srv, tname):
+                def dispatch_fn(**kwargs):
+                    return self.mcp.call_tool(srv, tname, kwargs)
+                dispatch_fn.__name__ = tname
+                return dispatch_fn
+            defn = {
+                "name": tool_name,
+                "fn": make_dispatch(tool["server"], tool["original_name"]),
+                "description": tool["description"],
+                "inputSchema": tool["inputSchema"],
+            }
+            self._mcp_tool_defs.append(defn)
+            self.registry.register(
+                tool_name, defn["fn"],
+                defn["description"], defn["inputSchema"],
+            )
+
+        self._mcp_enabled = True
+        print(f"[MCP] {len(self._mcp_tool_names)} tools registered")
+
+    def _enable_mcp(self):
+        if not self._mcp_ready:
+            self._mcp_ready = True
+            self._connect_mcp_servers()
+            return
+        if self._mcp_enabled:
+            return
+        for t in self._mcp_tool_defs:
+            self.registry.register(t["name"], t["fn"], t["description"], t["inputSchema"])
+        self._mcp_enabled = True
+
+    def _disable_mcp(self):
+        for name in self._mcp_tool_names:
+            self.registry.remove(name)
+        self._mcp_enabled = False
 
     def run_stream(self, user_input: str, session_id = None) -> Generator[str, None, None]:
+        cmd = user_input.strip().lower()
+        if cmd == "/mcp on":
+            self._enable_mcp()
+            yield "MCP 工具已启用。当前 MCP 工具：\n" + "\n".join(f"- {n}" for n in self._mcp_tool_names)
+            return
+        if cmd == "/mcp off":
+            self._disable_mcp()
+            yield "MCP 工具已禁用，切换为本地工具。输入 /mcp on 重新启用。"
+            return
+        if cmd in ("/help", "/h"):
+            yield "可用命令：\n  /mcp on  - 启用 MCP 工具\n  /mcp off - 禁用 MCP 工具\n  /help    - 显示此帮助"
+            return
+
         messages = [{"role": "system", "content": self._system_prompt()}]
 
         if session_id:
             history = self.store.load(str(session_id))
-            messages.extend(history) 
+            messages.extend(history)
 
         if user_input.lower() in ("quit", "exit", "q"):
             return "Quit"
@@ -45,17 +121,19 @@ class Agent:
         if cached:
             yield cached
             self.store.append(session_id, {"role": "assistant", "content": cached})
-            return 
+            return
 
         messages.append({"role": "user", "content": user_input})
         self.store.append(session_id=session_id, turn={"role": "user", "content": user_input})
 
-        for _ in range(self.max_turns):
+        for turn in range(self.max_turns):
+            tc = "none" if turn == self.max_turns - 1 else "auto"
+
             response = self.client.chat.completions.create(
                 model="deepseek-chat",
                 messages=messages,
                 tools=self.registry.schemas(),
-                tool_choice="auto",
+                tool_choice=tc,
                 temperature=0.3,
             )
 
@@ -72,9 +150,9 @@ class Agent:
                         for tc in msg.tool_calls
                     ]
                 })
-                self.store.append(session_id=session_id, 
-                                  turn={"role": "assistant", 
-                                        "content":  msg.content or "", 
+                self.store.append(session_id=session_id,
+                                  turn={"role": "assistant",
+                                        "content": msg.content or "",
                                         "tool_calls": [
                                             {"id": tc.id, "type": "function",
                                             "function": {"name": tc.function.name, "arguments":
@@ -92,8 +170,7 @@ class Agent:
                         "tool_call_id": tc.id,
                         "content": result,
                     })
-
-                    self.store.append(session_id=session_id, turn={"role": "tool", "content":  result, "tool_call_id": tc.id})
+                    self.store.append(session_id=session_id, turn={"role": "tool", "content": result, "tool_call_id": tc.id})
                 continue
 
             full = ""
@@ -107,12 +184,12 @@ class Agent:
                     full += chunk.choices[0].delta.content
 
             messages.append({"role": "assistant", "content": full})
-            self.store.append(session_id=session_id, turn={"role": "assistant", "content":  full})
+            self.store.append(session_id=session_id, turn={"role": "assistant", "content": full})
             yield "[DONE]"
-            return 
+            return
 
         yield "[ERROR] max turns reached"
-    
+
     def _system_prompt(self):
         return (
             "你是一个 AI 编程助手。\n"
@@ -124,44 +201,7 @@ class Agent:
             "- 调用 rag_query 工具后，检查返回内容是否与问题相关。\n"
             "  如果相关则基于知识回答；如果不相关则用自己的知识回答。\n"
         )
-    
-    def _connect_mcp_servers(self):
-        allowed_dir = os.path.abspath(".")
-        self.mcp.add_server(MCPServerConfig(
-            name="filesystem",
-            command="npx",
-            args=["-y", "@modelcontextprotocol/server-filesystem", allowed_dir],
-        ))
 
-        self.mcp.add_server(MCPServerConfig(
-            name="notion",
-            command="npx",
-            args=["-y", "@notionhq/notion-mcp-server"],
-        ))
-
-        self.mcp.connect_all()
-
-        mcp_tools = self.mcp.get_all_tools()
-        for tool in mcp_tools:
-            server_name = tool["server"]
-            original_name = tool["original_name"]
-            tool_name = tool["name"]
-
-            def make_dispatch(srv, tname):
-                def dispatch_fn(**kwargs):
-                    return self.mcp.call_tool(srv, tname, kwargs)
-                dispatch_fn.__name__ = tname
-                return dispatch_fn
-            
-            self.registry.register(
-                tool_name,
-                make_dispatch(server_name, original_name),
-                tool["description"],
-                tool["inputSchema"],
-            )
-
-        print(f"[MCP] {len(mcp_tools)} tools registered")
-    
     def _run_loop(self, user_message: str, system_prompt: str = None) -> str:
         messages = [{"role": "system", "content": system_prompt}]
         messages.append({"role": "user", "content": user_message})
@@ -174,7 +214,6 @@ class Agent:
                 tool_choice="auto",
                 temperature=0.3,
             )
-
             msg = response.choices[0].message
 
             if msg.tool_calls:
@@ -187,9 +226,8 @@ class Agent:
                     ]
                 })
                 for tc in msg.tool_calls:
-                    name = tc.function.name
                     args = json.loads(tc.function.arguments)
-                    result = self.registry.dispatch(name, args)
+                    result = self.registry.dispatch(tc.function.name, args)
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
                 continue
 
@@ -216,7 +254,7 @@ class Agent:
 
 if __name__ == "__main__":
     load_dotenv()
-    agent = Agent(max_turns=15)
+    agent = Agent(max_turns=20)
 
     while True:
         user_input = input("\n> ")

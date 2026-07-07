@@ -107,19 +107,27 @@ async function loadSessions() {
   data.sessions.forEach(s => {
     const div = document.createElement('div');
     div.className = 'session-item' + (s.id === currentSession ? ' active' : '');
-    div.textContent = s.name;
+    div.textContent = s.preview || s.name || '空对话';
     div.onclick = () => switchSession(s.id);
     list.appendChild(div);
   });
 }
 
 // 切换会话
-function switchSession(sid) {
+async function switchSession(sid) {
   currentSession = sid;
   document.getElementById('chatHeader').textContent = '当前对话';
-  document.getElementById('messages').innerHTML = '';
+  const msgDiv = document.getElementById('messages');
+  msgDiv.innerHTML = '';
   loadSessions();
   closeEventSource();
+
+  // 加载历史消息
+  try {
+    const res = await fetch(`/api/sessions/${sid}/history`);
+    const data = await res.json();
+    data.messages.forEach(m => addMessage(m.role, m.content));
+  } catch (e) { /* 无历史时保持空白 */ }
 }
 
 // 新建会话

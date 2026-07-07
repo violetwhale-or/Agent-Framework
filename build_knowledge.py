@@ -159,7 +159,7 @@ def build_from_directory(dir_path, db_path="./rag_data", max_size=500):
     build_knowledge(all_chunks, db_path)
 
 
-def build_from_directory(dir_path: str, db_path: str = "./rag_data", max_size: int = 1000):
+def build_from_directory(dir_path: str, db_path: str = "./rag_data", max_size: int = 600):
     """读取目录下所有 .md 文件，逐个切片后一并构建知识库"""
     import glob
     md_files = glob.glob(os.path.join(dir_path, "*.md"))
@@ -183,7 +183,6 @@ def build_from_directory(dir_path: str, db_path: str = "./rag_data", max_size: i
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("用法: python build_knowledge.py <文件或目录路径>")
-        print("示例: python build_knowledge.py RAG_learning/Qwen-Proxy.md")
         print("      python build_knowledge.py ./知识库目录/")
         sys.exit(1)
 

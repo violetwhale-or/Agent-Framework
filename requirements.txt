@@ -6,3 +6,5 @@ sse-starlette>=2.2.0
 sentence-transformers>=3.0.0
 chromadb>=0.5.0
 rank-bm25>=0.2.2
+trafilatura>=1.6.0
+lxml[html-clean]>=5.0.0
