@@ -112,6 +112,9 @@ class Agent:
 
         if session_id:
             history = self.store.load(str(session_id))
+            # 过滤末尾不完整的工具调用（LLM 返回了 tool_calls 但被中断未收到响应）
+            while history and history[-1].get("tool_calls"):
+                history.pop()
             messages.extend(history)
 
         if user_input.lower() in ("quit", "exit", "q"):
@@ -150,15 +153,8 @@ class Agent:
                         for tc in msg.tool_calls
                     ]
                 })
-                self.store.append(session_id=session_id,
-                                  turn={"role": "assistant",
-                                        "content": msg.content or "",
-                                        "tool_calls": [
-                                            {"id": tc.id, "type": "function",
-                                            "function": {"name": tc.function.name, "arguments":
-                                                        tc.function.arguments}}
-                                            for tc in msg.tool_calls
-                                        ]})
+                # 含工具调用的 assistant 消息不入历史，只保留最终回答
+                pass
 
                 for tc in msg.tool_calls:
                     name = tc.function.name
@@ -170,7 +166,9 @@ class Agent:
                         "tool_call_id": tc.id,
                         "content": result,
                     })
-                    self.store.append(session_id=session_id, turn={"role": "tool", "content": result, "tool_call_id": tc.id})
+                    # 工具结果压缩保存：非检索工具完整保存，检索工具保留摘要
+                    # 工具结果不入历史
+                    pass
                 continue
 
             full = ""
@@ -180,8 +178,12 @@ class Agent:
                 stream=True,
             ):
                 if chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
-                    full += chunk.choices[0].delta.content
+                    token = chunk.choices[0].delta.content
+                    # 过滤工具调用协议标签
+                    if any(tag in token for tag in ("<tool_calls>", "</tool_calls>", "<invoke", "</invoke>", "<parameter", "</parameter>")):
+                        continue
+                    yield token
+                    full += token
 
             messages.append({"role": "assistant", "content": full})
             self.store.append(session_id=session_id, turn={"role": "assistant", "content": full})
@@ -196,6 +198,7 @@ class Agent:
             "规则：\n"
             "- 每次行动前先思考是否需要工具\n"
             "- 用工具获取实际信息，不要猜测文件内容\n"
+            "- 在用户提出的需求明显具有时效性时,先使用shell命令得到当前真实日期时间,用于后续所有基于时间回答的所有问题\n"
             "- 完成用户请求后直接回复，不要额外调用工具\n"
             "- 如果 shell 命令返回错误，读报错信息，不要凭空猜测\n"
             "- 调用 rag_query 工具后，检查返回内容是否与问题相关。\n"

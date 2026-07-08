@@ -30,7 +30,15 @@ def _ensure_initialized():
         )
 
     print("🔄 [RAG] 首次加载嵌入模型...")
-    _model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
+    model_name = "BAAI/bge-small-zh-v1.5"
+    cache_path = os.path.join(
+        os.path.expanduser("~/.cache/huggingface/hub"),
+        f"models--{model_name.replace('/', '--')}"
+    )
+    if os.path.exists(cache_path):
+        _model = SentenceTransformer(model_name, local_files_only=True)
+    else:
+        _model = SentenceTransformer(model_name)
 
     client_db = chromadb.PersistentClient(db_path)
     _collection = client_db.get_collection("knowledge")
@@ -93,7 +101,7 @@ def rag_query(query: str) -> str:
         return "（未检索到相关信息）"
 
     # Rerank（数据量 > 1000 时启用）
-    if _bm25_data is not None and len(_bm25_data["texts"]) > 1000:
+    if _bm25_data is not None and len(_bm25_data["texts"]) > 10:
         _load_reranker()
         if _reranker is not None:
             pairs = [(query, text) for text in useful]
@@ -122,11 +130,16 @@ def _load_reranker():
     from sentence_transformers import CrossEncoder
     import torch
     print("🔄 [Rerank] 加载重排序模型（首次加载较慢）...")
-    _reranker = CrossEncoder(
-        "BAAI/bge-reranker-v2-m3",
-        max_length=512,
-        device="cuda" if torch.cuda.is_available() else "cpu",
+    model_name = "BAAI/bge-reranker-v2-m3"
+    cache_path = os.path.join(
+        os.path.expanduser("~/.cache/huggingface/hub"),
+        f"models--{model_name.replace('/', '--')}"
     )
+    kwargs = {"max_length": 512, "device": "cuda" if torch.cuda.is_available() else "cpu"}
+    if os.path.exists(cache_path):
+        _reranker = CrossEncoder(model_name, local_files_only=True, **kwargs)
+    else:
+        _reranker = CrossEncoder(model_name, **kwargs)
     print(f"✅ [Rerank] 加载完成（设备: {_reranker.device}）")
 
 

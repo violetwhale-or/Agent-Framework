@@ -105,8 +105,16 @@ def chunk_markdown_recursive(filepath: str, max_size: int = 1000) -> list[dict]:
 def build_knowledge(chunks: list[dict], db_path: str = "./rag_data", doc_source = None):
     """编码所有段落，存入 ChromaDB（覆盖重建）"""
     print("🔄 加载嵌入模型...")
-    model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
-    texts = [c["content"] for c in chunks]
+    model_name = "BAAI/bge-small-zh-v1.5"
+    cache_path = os.path.join(
+        os.path.expanduser("~/.cache/huggingface/hub"),
+        f"models--{model_name.replace('/', '--')}"
+    )
+    if os.path.exists(cache_path):
+        model = SentenceTransformer(model_name, local_files_only=True)
+    else:
+        model = SentenceTransformer(model_name)
+    texts = [f"{c['title']}\n{c['content']}" for c in chunks]
     meta = [{"title": c["title"], "source": doc_source} for c in chunks]
 
     print(f"🔢 编码 {len(texts)} 个段落...")

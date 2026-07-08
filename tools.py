@@ -215,7 +215,7 @@ def web_fetch_tool(url: str) -> dict:
         # 提取正文（去标签、去导航、去广告）
         try:
             import trafilatura
-            text = trafilatura.extract(resp.text)
+            text = trafilatura.extract(resp.text, output_format='markdown')
         except Exception:
             text = None
         if not text:
