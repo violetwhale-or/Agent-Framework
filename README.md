@@ -13,8 +13,10 @@ NN_text1/
 ├── docker-compose.yml     # 一键部署
 ├── Dockerfile             # 容器化镜像
 ├── index.html             # Web 聊天页面：深色主题、多会话切换
+├── local_llm.py           # 本地 Qwen2.5-1.5B (4-bit)：任务分类 + 对话摘要
 ├── mcp_client.py          # MCP 客户端：同步 subprocess，手动 JSON-RPC
 ├── mcp_manager.py         # MCP 管理器：多服务器发现、前缀路由
+├── memory.py              # 三级记忆：短期8轮滑动窗口 + 中期摘要 + 长期ChromaDB
 ├── rag_data/              # 本地知识库，使用 build_knowledge.py 构建
 ├── rag_tool.py            # RAG 检索：混合检索（语义+BM25）+ RRF 合并
 ├── README.md              # 项目说明
@@ -37,7 +39,7 @@ graph LR
 
 ### 核心循环（agentv2.py）
 
-- **ReAct 循环**：模型输出 → 工具调用 → 结果回喂 → 继续推理，最多 15 轮
+- **ReAct 循环**：模型输出 → 工具调用 → 结果回喂 → 继续推理，最多 20 轮（可以自行限制）
 - **流式输出**：`run_stream()` 生成器 + SSE 推送到浏览器（逐字显示）
 - **会话持久化**：每轮对话写入 `agent_sessions.json`，跨轮次记忆恢复
 - **语义缓存**：命中相似问题（余弦相似度 ≥ 0.85）时直接返回缓存回答
@@ -48,6 +50,8 @@ graph LR
 - **网络搜索**：`web_fetch` 工具支持获取 URL 内容，内置 trafilatura 正文提取 + 正则去标签双重保障
 - **文件写入保护**：`write_file_tool` 改为两步确认，先返回预览，用户同意后调用 `confirm_write` 执行
 - **轮次上限强制输出**：最后一轮自动设置 `tool_choice="none"`，确保 LLM 必定输出最终回答
+- **本地 LLM 任务分类**：Qwen2.5-1.5B (4-bit) 入口预判是否需要工具，简单问题走简化 prompt，省 Token 省成本
+- **三级记忆系统**：短期 8 轮滑动窗口 + 中期摘要(本地模型生成) + 长期 ChromaDB 归档
 
 ### 工具系统
 
@@ -79,11 +83,19 @@ graph LR
 ### RAG 知识库
 
 - **构建与检索分离**：`build_knowledge.py` 独立构建索引，`rag_tool.py` 只做检索
-- **递归切片**：按 `##` → `###` → `####` → 段落 层级切割，单块上限 500 字
+- **递归切片**：按 `##` → `###` → `####` → 段落 层级切割，单块上限 500 字，额外保护文本内公式、代码，避免分散切块
 - **混合检索**：bge-small 语义检索 + BM25 关键词检索 + RRF 排名合并
 - **阈值筛选**：距离 > 0.7 自动丢弃，节省 Token
 - **懒加载**：首次调用 `rag_query` 时加载模型，启动不阻塞
 - **来源标记**：metadata 记录文档来源，检索结果附带文件名
+
+### 记忆系统（memory.py）
+
+- **短期记忆**：滑动窗口固定 8 轮完整对话，淘汰时触发归档
+- **中期记忆**：淘汰轮由本地 Qwen2.5 生成单句摘要，最多存 9 条；常驻上下文兜底过期历史
+- **长期记忆**：淘汰轮全文归档至 ChromaDB 向量库，按需语义召回
+- **关键词记忆**：低频增量追加用户偏好/规则/专有名词，持久化到 `keyword_memory.json`
+- **摘要生成**：本地已量化 Qwen2.5-1.5B 替代 DeepSeek API，淘汰时异步执行，零 API 费用
 
 ### Web 界面（server.py + index.html）
 
@@ -196,6 +208,25 @@ python eval_rag.py
 | `/mcp off` | 禁用 MCP 工具，切换为本地工具 |
 | `/help` 或 `/h` | 显示可用命令列表 |
 
+### 7. 本地 LLM（可选）
+
+首次运行 agent 时会自动下载 Qwen2.5-1.5B-Instruct 4-bit 量化模型（~750MB）。
+也可手动下载：
+
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+python -c "from local_llm import classify; print(classify('test'))"
+```
+
+下载完成后设置离线模式：
+
+```bash
+export HF_HUB_OFFLINE=1
+python agentv2.py
+```
+
+本地模型承担任务分类和淘汰轮次的摘要生成，不参与主 LLM 推理，不影响回答质量。
+
 ## 环境变量
 
 创建 `.env` 文件：
@@ -215,7 +246,28 @@ DEEPSEEK_API_KEY=sk-your-key-here
 
 ## 版本记录
 
-### v2.3 — 网络搜索 + 对话控制 + 写入保护（当前版本）
+### v2.4 — 本地 LLM + 三级记忆（当前版本）
+
+**新增文件：**
+- `local_llm.py` — Qwen2.5-1.5B 4-bit 量化封装（任务分类 + 对话摘要）
+- `memory.py` — 三级记忆系统（ShortTermMemory / MidTermMemory / LongTermMemory / KeywordMemory）
+
+**能力提升：**
+- 入口预分类：本地 Qwen2.5 判断是否需要工具，简单问题走简化 prompt，省 Token 省成本
+- 淘汰式摘要：淘汰轮次由本地模型生成中期摘要，零 API 费用
+- 关键词记忆：LLM 发现用户偏好/规则时增量追加，低频更新
+- 缓存友好：系统 prompt 先于中期摘要/短期历史拼接，前缀命中率高，减少总 Token 避免窗口容量爆炸
+- `_compress_for_storage`：工具返回结果压缩后存入短期记忆，减少上下文膨胀
+- `_run_loop` 与 `run_stream` 共享拆分逻辑，消除代码重复
+
+**依赖新增：**
+- `transformers` — 加载 Qwen 模型
+- `bitsandbytes` — 4-bit 量化支持
+- `accelerate` — 模型分发
+
+---
+
+### v2.3 — 网络搜索 + 对话控制 + 写入保护
 
 **新增文件：** `Agent实际问题记录.md`
 

@@ -193,8 +193,12 @@ async function send() {
           } catch (e) { /* 忽略非 JSON 行 */ }
         }
         if (line.startsWith('event: done')) {
-          // 回复结束，最后渲染一次
-          aiDiv.innerHTML = marked.parse(aiDiv.textContent);
+          // 回复结束，最后渲染一次（剥离系统标签）
+          let finalText = aiDiv.textContent
+            .replace(/\[SUMMARY\][\s\S]*?\[\/SUMMARY\]/g, '')
+            .replace(/\[KEYWORDS\][\s\S]*?\[\/KEYWORDS\]/g, '')
+            .replace(/\[\/?SUMMARY\]|\[\/?KEYWORDS\]/g, '');
+          aiDiv.innerHTML = marked.parse(finalText);
         }
       }
     }

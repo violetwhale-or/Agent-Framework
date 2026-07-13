@@ -58,7 +58,7 @@ async def list_sessions():
         _save_sessions(sessions)
     result = []
     for sid, name in sessions.items():
-        history = agent.store.load(sid)
+        history = agent.memory.short.load(sid)
         preview = ""
         for msg in history:
             if msg.get("role") == "user":
@@ -80,7 +80,7 @@ async def create_session():
 @app.get("/api/sessions/{session_id}/history")
 async def get_session_history(session_id: str):
     """返回指定会话的历史消息列表"""
-    history = agent.store.load(session_id)
+    history = agent.memory.short.load(session_id)
     return {"messages": history}
 
 

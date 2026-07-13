@@ -37,6 +37,62 @@ def split_by_heading(text: str, pattern: str) -> list[dict]:
     return chunks
 
 
+def _split_preserving_blocks(text: str, min_len: int = 20) -> list[str]:
+    """
+    按段落切分，保护 ``` 代码块和 | 表格不被 \n\n 切开。
+    """
+    lines = text.split("\n")
+    blocks = []
+    current = []
+    in_code = False
+
+    for line in lines:
+        # 代码块边界 ```（保护整体）
+        if line.strip().startswith("```"):
+            if in_code:
+                current.append(line)
+                blocks.append("\n".join(current))
+                current, in_code = [], False
+            else:
+                if current:
+                    blocks.append("\n".join(current))
+                    current = []
+                in_code = True
+                current.append(line)
+            continue
+
+        if in_code:
+            current.append(line)
+            continue
+
+        # 表格行（连续 | 开头且 | 结尾 → 统一归入表格块）
+        current.append(line)
+
+    if current:
+        blocks.append("\n".join(current))
+
+    # 展开非保护的段落
+    result = []
+    for blk in blocks:
+        blk = blk.strip()
+        if not blk:
+            continue
+        # 代码块或表格块 → 整块保留
+        if blk.startswith("```") or all(
+            l.strip().startswith("|") and l.strip().endswith("|")
+            for l in blk.split("\n") if l.strip()
+        ):
+            if len(blk) > min_len:
+                result.append(blk)
+        else:
+            # 普通段落按 \n\n 切
+            for p in blk.split("\n\n"):
+                p = p.strip()
+                if len(p) > min_len:
+                    result.append(p)
+    return result
+
+
 def _recursive_chunk(content: str, title: str,
                      patterns: list[str], max_size: int) -> list[dict]:
     """
@@ -56,13 +112,12 @@ def _recursive_chunk(content: str, title: str,
     if len(content) <= max_size:
         return [{"title": title, "content": content}]
 
-    # ② 标题层级耗尽，段落兜底
+    # ② 标题层级耗尽，按段落切分（保护代码块和表格）
     if not patterns:
-        paras = [p.strip() for p in content.split("\n\n")
-                 if len(p.strip()) > 20]
-        if not paras:
+        pieces = _split_preserving_blocks(content, min_len=20)
+        if not pieces:
             return [{"title": title, "content": content[:max_size]}]
-        return [{"title": title, "content": p} for p in paras]
+        return [{"title": title, "content": p} for p in pieces]
 
     # ③ 尝试当前标题层级
     subs = split_by_heading(content, patterns[0])
@@ -103,7 +158,7 @@ def chunk_markdown_recursive(filepath: str, max_size: int = 1000) -> list[dict]:
 
 
 def build_knowledge(chunks: list[dict], db_path: str = "./rag_data", doc_source = None):
-    """编码所有段落，存入 ChromaDB（覆盖重建）"""
+    """编码所有段落，存入 ChromaDB（先删后建，避免追加写入不可靠）"""
     print("🔄 加载嵌入模型...")
     model_name = "BAAI/bge-small-zh-v1.5"
     cache_path = os.path.join(
@@ -115,24 +170,31 @@ def build_knowledge(chunks: list[dict], db_path: str = "./rag_data", doc_source 
     else:
         model = SentenceTransformer(model_name)
     texts = [f"{c['title']}\n{c['content']}" for c in chunks]
-    meta = [{"title": c["title"], "source": doc_source} for c in chunks]
+    meta = [{"title": c["title"], "source": doc_source or c.get("source", "")} for c in chunks]
 
     print(f"🔢 编码 {len(texts)} 个段落...")
     vectors = model.encode(texts)
 
     client = chromadb.PersistentClient(path=db_path)
+    # 追加模式：用 uuid 做 ID 避免重复
+    import uuid
     try:
         col = client.get_collection("knowledge")
-        print(f"已有知识库（{col.count()} 条），当前文档追加入知识库")
+        print(f"已有知识库（{col.count()} 条），追加中...")
     except Exception:
         col = client.create_collection("knowledge")
 
-    col.add(
-        ids=[f"c-{i:04d}" for i in range(len(chunks))],
-        embeddings=vectors.tolist(),
-        documents=texts,
-        metadatas=meta,
-    )
+    # 分批写入（ChromaDB 单次上限约 5461 条）
+    BATCH_SIZE = 5000
+    for i in range(0, len(chunks), BATCH_SIZE):
+        batch_end = min(i + BATCH_SIZE, len(chunks))
+        col.add(
+            ids=[str(uuid.uuid4()) for _ in range(batch_end - i)],
+            embeddings=vectors.tolist()[i:batch_end],
+            documents=texts[i:batch_end],
+            metadatas=meta[i:batch_end],
+        )
+        print(f"  ... 写入 {batch_end}/{len(chunks)} 条")
     print(f"✅ 构建完成：{len(chunks)} 条，存储在 {db_path}/")
 
     tokenized_corpus = [c["content"].split() for c in chunks]       # 这里开始是计算bm25关键词相似的索引库
@@ -148,35 +210,16 @@ def build_knowledge(chunks: list[dict], db_path: str = "./rag_data", doc_source 
     print(f"✅ BM25 索引已保存（{len(chunks)} 条）→ {index_path}")
 
 
-def build_from_directory(dir_path, db_path="./rag_data", max_size=500):
-    md_files = glob.glob(os.path.join(dir_path, "*.md"))
+def build_from_directory(dir_path: str, db_path: str = "./rag_data", max_size: int = 1000):
+    """读取目录下所有 .md 文件，逐个切片后一并构建知识库"""
+    import glob
+    md_files = sorted(glob.glob(os.path.join(dir_path, "*.md")))
     if not md_files:
         print(f"目录下没有 .md 文件: {dir_path}")
         return
 
     all_chunks = []
-    for fp in sorted(md_files):
-        fname = os.path.basename(fp)
-        print(f"📖 {fname}")
-        chunks = chunk_markdown_recursive(fp, max_size)
-        for c in chunks:
-            c["source"] = fname
-        all_chunks.extend(chunks)
-        print(f"   → {len(chunks)} 块")
-
-    build_knowledge(all_chunks, db_path)
-
-
-def build_from_directory(dir_path: str, db_path: str = "./rag_data", max_size: int = 600):
-    """读取目录下所有 .md 文件，逐个切片后一并构建知识库"""
-    import glob
-    md_files = glob.glob(os.path.join(dir_path, "*.md"))
-    if not md_files:
-        print(f"❌ 目录下没有 .md 文件: {dir_path}")
-        return
-
-    all_chunks = []
-    for fp in sorted(md_files):
+    for fp in md_files:
         fname = os.path.basename(fp)
         print(f"📖 {fname}")
         chunks = chunk_markdown_recursive(fp, max_size)

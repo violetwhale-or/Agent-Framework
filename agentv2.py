@@ -4,8 +4,10 @@ import shutil
 from openai import OpenAI
 from dotenv import load_dotenv
 from typing import Generator
-from tools import build_default_registry, SessionStore, SubagentPool, SemanticCache
+from tools import build_default_registry, SubagentPool, SemanticCache
 from mcp_manager import MCPManager, MCPServerConfig
+from memory import MemoryManager
+os.environ['HF_HUB_OFFLINE'] = '1'
 
 
 class Agent:
@@ -13,7 +15,7 @@ class Agent:
         self.client = OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
         self.max_turns = max_turns
         self.registry = build_default_registry()
-        self.store = SessionStore("agent_sessions.json")
+        self.memory = MemoryManager(llm_client=self.client, short_term_path="agent_sessions.json")
         self.subagent_pool = SubagentPool(self)
         self.registry.register(
             "subagent_task",
@@ -94,6 +96,52 @@ class Agent:
             self.registry.remove(name)
         self._mcp_enabled = False
 
+    def _compress_for_storage(self, name: str, result: str, max_len: int = 300) -> str:
+        try:
+            data = json.loads(result)
+        except (json.JSONDecodeError, TypeError):
+            data = None
+
+        if name == "rag_query":
+            return self._compress_rag_result(result)
+
+        if name == "write_file_tool" and isinstance(data, dict):
+            return json.dumps({
+                "action": "write",
+                "path": data.get("path", data.get("message", "")),
+                "size": data.get("bytes_written", "pending"),
+            }, ensure_ascii=False)
+
+        if name == "confirm_write" and isinstance(data, dict):
+            return json.dumps({
+                "action": "confirmed_write",
+                "path": data.get("path", ""),
+                "bytes": data.get("bytes_written", 0),
+            }, ensure_ascii=False)
+
+        if name == "web_fetch" and isinstance(data, dict):
+            return json.dumps({
+                "url": data.get("url", ""),
+                "status": data.get("status", 0),
+                "preview": (data.get("content", "") or "")[:200],
+            }, ensure_ascii=False)
+
+        if len(result) <= max_len:
+            return result
+        return result[:max_len] + f"\n...(共 {len(result)} 字，已压缩)"
+
+    def _compress_rag_result(self, result: str) -> str:
+        import re
+        sources = re.findall(r'\(([^)]+\.md)\)', result)
+        source_list = list(dict.fromkeys(sources))
+        plain = re.sub(r'\([^)]+\.md\)', '', result).strip()
+        keywords = plain[:100].replace('\n', ' ')
+        return json.dumps({
+            "type": "rag",
+            "sources": source_list or ["知识库"],
+            "match": keywords + ("..." if len(plain) > 100 else ""),
+        }, ensure_ascii=False)
+
     def run_stream(self, user_input: str, session_id = None) -> Generator[str, None, None]:
         cmd = user_input.strip().lower()
         if cmd == "/mcp on":
@@ -108,13 +156,24 @@ class Agent:
             yield "可用命令：\n  /mcp on  - 启用 MCP 工具\n  /mcp off - 禁用 MCP 工具\n  /help    - 显示此帮助"
             return
 
-        messages = [{"role": "system", "content": self._system_prompt()}]
+        import re
+        tk = {"hit": 0, "miss": 0, "in": 0, "out": 0}
+
+        # 本地模型预分类：判断是否需要工具
+        _direct_mode = False
+        try:
+            from local_llm import classify
+            _direct_mode = classify(user_input) == "direct"
+        except Exception:
+            pass
+
+        messages = [{"role": "system", "content": self._system_prompt(direct_mode=_direct_mode)}]
 
         if session_id:
-            history = self.store.load(str(session_id))
-            # 过滤末尾不完整的工具调用（LLM 返回了 tool_calls 但被中断未收到响应）
-            while history and history[-1].get("tool_calls"):
-                history.pop()
+            mid_block = self.memory.mid.get_block(session_id)
+            if mid_block:
+                messages.append({"role": "user", "content": mid_block})
+            history = self.memory.short.load(str(session_id))
             messages.extend(history)
 
         if user_input.lower() in ("quit", "exit", "q"):
@@ -123,27 +182,32 @@ class Agent:
         cached = self.cache.get(user_input)
         if cached:
             yield cached
-            self.store.append(session_id, {"role": "assistant", "content": cached})
+            self.memory.short.append(session_id, {"role": "assistant", "content": cached})
             return
 
         messages.append({"role": "user", "content": user_input})
-        self.store.append(session_id=session_id, turn={"role": "user", "content": user_input})
+        self.memory.short.append(session_id=session_id, turn={"role": "user", "content": user_input})
 
         for turn in range(self.max_turns):
-            tc = "none" if turn == self.max_turns - 1 else "auto"
+            tc = "none" if (_direct_mode or turn == self.max_turns - 1) else "auto"
 
             response = self.client.chat.completions.create(
                 model="deepseek-chat",
                 messages=messages,
-                tools=self.registry.schemas(),
+                tools=self.registry.schemas() if not _direct_mode else [],
                 tool_choice=tc,
                 temperature=0.3,
             )
 
+            u = response.usage
+            tk["hit"] += getattr(u, "prompt_cache_hit_tokens", 0)
+            tk["miss"] += getattr(u, "prompt_cache_miss_tokens", 0)
+            tk["in"] += u.prompt_tokens
+            tk["out"] += u.completion_tokens
             msg = response.choices[0].message
 
             if msg.tool_calls:
-                messages.append({
+                tc_msg = {
                     "role": "assistant",
                     "content": msg.content or "",
                     "tool_calls": [
@@ -152,26 +216,25 @@ class Agent:
                                     tc.function.arguments}}
                         for tc in msg.tool_calls
                     ]
-                })
-                # 含工具调用的 assistant 消息不入历史，只保留最终回答
-                pass
+                }
+                messages.append(tc_msg)
+                self.memory.short.append(session_id, tc_msg)
 
                 for tc in msg.tool_calls:
                     name = tc.function.name
                     args = json.loads(tc.function.arguments)
                     yield f"[tool] {name}({json.dumps(args, ensure_ascii=False)})"
-                    result = self.registry.dispatch(name, args)
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": result,
+                    raw = self.registry.dispatch(name, args)
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": raw})
+                    compressed = self._compress_for_storage(name, raw)
+                    self.memory.short.append(session_id, {
+                        "role": "tool", "tool_call_id": tc.id,
+                        "content": compressed, "tool_name": name,
                     })
-                    # 工具结果压缩保存：非检索工具完整保存，检索工具保留摘要
-                    # 工具结果不入历史
-                    pass
                 continue
 
             full = ""
+            last_chunk = None
             for chunk in self.client.chat.completions.create(
                 model="deepseek-chat",
                 messages=messages,
@@ -179,26 +242,41 @@ class Agent:
             ):
                 if chunk.choices[0].delta.content:
                     token = chunk.choices[0].delta.content
-                    # 过滤工具调用协议标签
+                    full += token
                     if any(tag in token for tag in ("<tool_calls>", "</tool_calls>", "<invoke", "</invoke>", "<parameter", "</parameter>")):
                         continue
                     yield token
-                    full += token
+                last_chunk = chunk
+
+            if last_chunk and last_chunk.usage:
+                u = last_chunk.usage
+                tk["hit"] += getattr(u, "prompt_cache_hit_tokens", 0)
+                tk["miss"] += getattr(u, "prompt_cache_miss_tokens", 0)
+                tk["in"] += u.prompt_tokens
+                tk["out"] += u.completion_tokens
 
             messages.append({"role": "assistant", "content": full})
-            self.store.append(session_id=session_id, turn={"role": "assistant", "content": full})
+            self.memory.short.append(session_id=session_id, turn={"role": "assistant", "content": full})
+            self.memory.on_turn_complete(session_id, user_input, full)
+            cost = (tk["miss"] * 2 + tk["hit"] * 0.5 + tk["out"] * 8) / 1_000_000
+            yield f"\n---\n[tokens] 本轮回合计: 输入={tk['in']}(缓存命中={tk['hit']},未命中={tk['miss']}), 输出={tk['out']}, 预估≈{cost:.4f}元"
             yield "[DONE]"
             return
 
         yield "[ERROR] max turns reached"
 
-    def _system_prompt(self):
+    def _system_prompt(self, direct_mode: bool = False):
+        if direct_mode:
+            return (
+                "你是一个 AI 编程助手。用户问了一个知识性问题，不需要调用工具，直接回答即可。\n"
+                "完成回答后直接结束，不要输出任何额外的标记。\n"
+            )
         return (
             "你是一个 AI 编程助手。\n"
             "规则：\n"
             "- 每次行动前先思考是否需要工具\n"
             "- 用工具获取实际信息，不要猜测文件内容\n"
-            "- 在用户提出的需求明显具有时效性时,先使用shell命令得到当前真实日期时间,用于后续所有基于时间回答的所有问题\n"
+            "- 在用户提出的需求明显具有时效性时,先使用shell命令得到当前真实日期时间\n"
             "- 完成用户请求后直接回复，不要额外调用工具\n"
             "- 如果 shell 命令返回错误，读报错信息，不要凭空猜测\n"
             "- 调用 rag_query 工具后，检查返回内容是否与问题相关。\n"
@@ -230,11 +308,12 @@ class Agent:
                 })
                 for tc in msg.tool_calls:
                     args = json.loads(tc.function.arguments)
-                    result = self.registry.dispatch(tc.function.name, args)
-                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                    raw = self.registry.dispatch(tc.function.name, args)
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": raw})
                 continue
 
             full = ""
+
             for chunk in self.client.chat.completions.create(
                 model="deepseek-chat", messages=messages, stream=True,
             ):

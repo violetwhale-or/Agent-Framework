@@ -1,10 +1,3 @@
-"""
-rag_tool.py — RAG 检索工具（懒加载版）
-
-只在第一次调用 rag_query() 时加载模型和知识库。
-启动阶段不影响 agent 初始化速度。
-"""
-
 import os
 import chromadb
 import pickle
@@ -12,6 +5,9 @@ from sentence_transformers import SentenceTransformer
 
 
 _model = None
+def get_model():
+    return _model
+
 _collection = None
 db_path = "./rag_data"
 _bm25_data = None
@@ -95,7 +91,7 @@ def rag_query(query: str) -> str:
             rrf_scores[doc_text] = rrf_scores.get(doc_text, 0) + 1 / (60 + rank)
 
     # 取 Top3
-    final_rank = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:3]
+    final_rank = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:5]
     useful = [text for text, _ in final_rank]
     if not useful:
         return "（未检索到相关信息）"
