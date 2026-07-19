@@ -1,11 +1,14 @@
 import sys
 import re
 import os
+import uuid
 import chromadb
 import pickle
 import glob
+import jieba
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
+from agent_config import config
 
 
 def split_by_heading(text: str, pattern: str) -> list[dict]:
@@ -157,7 +160,7 @@ def chunk_markdown_recursive(filepath: str, max_size: int = 1000) -> list[dict]:
     return result
 
 
-def build_knowledge(chunks: list[dict], db_path: str = "./rag_data", doc_source = None):
+def build_knowledge(chunks: list[dict], db_path: str = config.chroma.db_path, doc_source = None):
     """编码所有段落，存入 ChromaDB（先删后建，避免追加写入不可靠）"""
     print("🔄 加载嵌入模型...")
     model_name = "BAAI/bge-small-zh-v1.5"
@@ -176,13 +179,13 @@ def build_knowledge(chunks: list[dict], db_path: str = "./rag_data", doc_source 
     vectors = model.encode(texts)
 
     client = chromadb.PersistentClient(path=db_path)
-    # 追加模式：用 uuid 做 ID 避免重复
-    import uuid
+    # 先删后建：确保重建时不会累积旧数据
     try:
-        col = client.get_collection("knowledge")
-        print(f"已有知识库（{col.count()} 条），追加中...")
+        client.delete_collection("knowledge")
+        print("已删除旧知识库，重新构建...")
     except Exception:
-        col = client.create_collection("knowledge")
+        pass
+    col = client.create_collection("knowledge")
 
     # 分批写入（ChromaDB 单次上限约 5461 条）
     BATCH_SIZE = 5000
@@ -197,7 +200,8 @@ def build_knowledge(chunks: list[dict], db_path: str = "./rag_data", doc_source 
         print(f"  ... 写入 {batch_end}/{len(chunks)} 条")
     print(f"✅ 构建完成：{len(chunks)} 条，存储在 {db_path}/")
 
-    tokenized_corpus = [c["content"].split() for c in chunks]       # 这里开始是计算bm25关键词相似的索引库
+    # 中文分词（jieba）后计算 BM25 索引
+    tokenized_corpus = [list(jieba.cut(c["content"])) for c in chunks]
     bm25 = BM25Okapi(tokenized_corpus)
 
     index_path = os.path.join(db_path, "bm25_index.pkl")
@@ -212,7 +216,6 @@ def build_knowledge(chunks: list[dict], db_path: str = "./rag_data", doc_source 
 
 def build_from_directory(dir_path: str, db_path: str = "./rag_data", max_size: int = 1000):
     """读取目录下所有 .md 文件，逐个切片后一并构建知识库"""
-    import glob
     md_files = sorted(glob.glob(os.path.join(dir_path, "*.md")))
     if not md_files:
         print(f"目录下没有 .md 文件: {dir_path}")

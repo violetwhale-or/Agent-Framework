@@ -4,15 +4,16 @@ import shutil
 from openai import OpenAI
 from dotenv import load_dotenv
 from typing import Generator
-from tools import build_default_registry, SubagentPool, SemanticCache
-from mcp_manager import MCPManager, MCPServerConfig
-from memory import MemoryManager
+from core.tools import build_default_registry, SubagentPool, SemanticCache
+from mcp.manager import MCPManager, MCPServerConfig
+from core.memory import MemoryManager
+from agent_config import config
 os.environ['HF_HUB_OFFLINE'] = '1'
 
 
 class Agent:
-    def __init__(self, max_turns: int = 15):
-        self.client = OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com")
+    def __init__(self, max_turns: int = config.llm.max_turns):
+        self.client = OpenAI(api_key=os.environ["DEEPSEEK_API_KEY"], base_url=config.llm.base_url)
         self.max_turns = max_turns
         self.registry = build_default_registry()
         self.memory = MemoryManager(llm_client=self.client, short_term_path="agent_sessions.json")
@@ -29,7 +30,7 @@ class Agent:
                 "required": ['task']
             }
         )
-        self.cache = SemanticCache(threshold=0.85, ttl_seconds=300)
+        self.cache = SemanticCache(threshold=config.cache.threshold, ttl_seconds=config.cache.ttl_seconds)
 
         self.mcp = MCPManager()
         self._mcp_ready = False
@@ -162,7 +163,7 @@ class Agent:
         # 本地模型预分类：判断是否需要工具
         _direct_mode = False
         try:
-            from local_llm import classify
+            from core.local_llm import classify
             _direct_mode = classify(user_input) == "direct"
         except Exception:
             pass
@@ -243,8 +244,6 @@ class Agent:
                 if chunk.choices[0].delta.content:
                     token = chunk.choices[0].delta.content
                     full += token
-                    if any(tag in token for tag in ("<tool_calls>", "</tool_calls>", "<invoke", "</invoke>", "<parameter", "</parameter>")):
-                        continue
                     yield token
                 last_chunk = chunk
 
@@ -258,7 +257,7 @@ class Agent:
             messages.append({"role": "assistant", "content": full})
             self.memory.short.append(session_id=session_id, turn={"role": "assistant", "content": full})
             self.memory.on_turn_complete(session_id, user_input, full)
-            cost = (tk["miss"] * 2 + tk["hit"] * 0.5 + tk["out"] * 8) / 1_000_000
+            cost = (tk["miss"] * config.billing.cache_miss_rate + tk["hit"] * config.billing.cache_hit_rate + tk["out"] * config.billing.output_rate) / 1_000_000
             yield f"\n---\n[tokens] 本轮回合计: 输入={tk['in']}(缓存命中={tk['hit']},未命中={tk['miss']}), 输出={tk['out']}, 预估≈{cost:.4f}元"
             yield "[DONE]"
             return
@@ -329,9 +328,6 @@ class Agent:
                 self.mcp.disconnect_all()
             except Exception:
                 pass
-
-    def __del__(self):
-        pass
 
 
 if __name__ == "__main__":

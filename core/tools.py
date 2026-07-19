@@ -1,19 +1,19 @@
 import json 
-import datetime
+from datetime import datetime
 import math
 import time
 import subprocess
+from agent_config import config
 import pathlib
 import glob
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor
 import httpx
-from urllib.parse import quote
 
 # 待确认的写入操作
 _pending_writes: list[dict] = []
-from rag_tool import rag_query
+from rag.rag_tool import rag_query
 
 class ToolRegistry:
     def __init__(self):
@@ -117,7 +117,7 @@ class SubagentPool:
         
 
 class SemanticCache:
-    def __init__(self, threshold = 0.85, ttl_seconds = 300):
+    def __init__(self, threshold = config.cache.threshold, ttl_seconds = config.cache.ttl_seconds):
         self.entries = []   # 每个元素: {"query": str, "embedding": dict, "response": str, "timestamp": float}
         self.threshold = threshold
         self.ttl = ttl_seconds
@@ -236,7 +236,7 @@ def shell_tool(command: str) -> dict:
             return {"error": f"危险命令被拦截: {d}"}
     try:
         result = subprocess.run(command, shell=True, capture_output=True,
-                                text=True, timeout=30)
+                                text=True, timeout=config.tool.shell_timeout)
         return {"stdout": result.stdout[-4000:], 
                 "stderr": result.stderr[-2000:],
                 "returncode": result.returncode,

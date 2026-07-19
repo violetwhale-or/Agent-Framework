@@ -9,6 +9,7 @@
   - 每条记录的标题和字数
 """
 
+from collections import Counter
 from sentence_transformers import SentenceTransformer
 import chromadb
 
@@ -21,7 +22,6 @@ all_data = col.get(limit=col.count(), include=["documents", "metadatas"])
 print(f"\n知识库总条数: {col.count()}\n")
 
 # 按来源统计
-from collections import Counter
 sources = Counter()
 for m in all_data["metadatas"]:
     src = m.get("source", "未知") if m else "未知"

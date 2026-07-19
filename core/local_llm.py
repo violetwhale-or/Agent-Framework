@@ -21,6 +21,7 @@ local_llm.py — 本地小模型封装（Qwen2.5-1.5B-Instruct 4-bit）
 import os
 import threading
 from typing import Optional
+from agent_config import config
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -28,7 +29,7 @@ _model = None
 _tokenizer = None
 _loaded = False
 _lock = threading.Lock()
-_MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+_MODEL_NAME = config.local_llm.model_name
 
 
 def _ensure_loaded():
@@ -51,14 +52,29 @@ def _ensure_loaded():
             )
 
             _tokenizer = AutoTokenizer.from_pretrained(
-                _MODEL_NAME, trust_remote_code=True,
+                _MODEL_NAME, trust_remote_code=True, local_files_only=True,
             )
-            _model = AutoModelForCausalLM.from_pretrained(
-                _MODEL_NAME,
-                quantization_config=quantization_config,
-                device_map="auto",
-                trust_remote_code=True,
-            )
+
+            # 优先离线加载（避免线上验证卡住），失败时尝试在线下载
+            try:
+                print("[local_llm] 加载权重（离线）...")
+                _model = AutoModelForCausalLM.from_pretrained(
+                    _MODEL_NAME,
+                    quantization_config=quantization_config,
+                    device_map="auto",
+                    trust_remote_code=True,
+                    local_files_only=True,
+                )
+            except OSError:
+                print("[local_llm] 本地缓存未命中，尝试在线下载...")
+                print("[local_llm] 如需离线加载，请设置: export HF_HUB_OFFLINE=1")
+                _model = AutoModelForCausalLM.from_pretrained(
+                    _MODEL_NAME,
+                    quantization_config=quantization_config,
+                    device_map="auto",
+                    trust_remote_code=True,
+                    local_files_only=False,
+                )
             _loaded = True
             print(f"[local_llm] 加载完成（设备: {_model.device}）")
         except Exception as e:
@@ -80,7 +96,7 @@ def _ensure_loaded():
                 print("[local_llm] 本地模型不可用，将回退到在线 API")
 
 
-def _generate(prompt: str, max_new_tokens: int = 200, temperature: float = 0.1) -> str:
+def _generate(prompt: str, max_new_tokens: int = config.local_llm.summarize_max_tokens, temperature: float = config.local_llm.summarize_temperature) -> str:
     if not _loaded:
         return ""
     messages = [{"role": "user", "content": prompt}]
@@ -128,7 +144,7 @@ def classify(query: str) -> str:
         "只返回一行结果，不要多余解释。\n\n"
         f"问题：{query}"
     )
-    result = _generate(prompt, max_new_tokens=100)
+    result = _generate(prompt, max_new_tokens=config.local_llm.classify_max_tokens)
     result = result.strip().lower()
 
     if result.startswith("tools:"):
@@ -156,4 +172,4 @@ def summarize(user_msg: str, assistant_msg: str) -> str:
         f"助手：{assistant_msg}\n\n"
         "总结："
     )
-    return _generate(prompt, max_new_tokens=200, temperature=0.3)
+    return _generate(prompt, max_new_tokens=config.local_llm.summarize_max_tokens, temperature=config.local_llm.summarize_temperature)

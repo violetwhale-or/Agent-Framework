@@ -12,10 +12,10 @@ eval_rag.py — RAG 检索评估
 import os
 import sys
 import time
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from rag_tool import _ensure_initialized
-import rag_tool
+from rag.rag_tool import _ensure_initialized
+from rag import rag_tool
 
 # ─── 测试集 ──────────────────────────────────────────────
 # 80 题，覆盖 RAG_initial_markdown/ 下全部 6 篇中文文档
@@ -131,7 +131,7 @@ def _vector_only_search(query: str, n: int = 20) -> list[str]:
 
 def _hybrid_search(query: str) -> list[str]:
     """混合检索：调用 rag_query 并解析返回结果"""
-    from rag_tool import rag_query as rq
+    from rag.rag_tool import rag_query as rq
     raw = rq(query)
     parts = [p.strip() for p in raw.split("\n\n---\n\n") if p.strip()]
     return parts

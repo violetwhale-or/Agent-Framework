@@ -8,7 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 from dotenv import load_dotenv
 from agentv2 import Agent
-import asyncio
+from agent_config import config
+
 
 # 让相对路径相对于 server.py 所在目录，而不是运行目录
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -25,7 +26,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-agent = Agent(max_turns=15)
+agent = Agent(max_turns=config.llm.max_turns)
 
 SESSIONS_FILE = os.path.join(BASE_DIR, "sessions_index.json")
 
@@ -98,8 +99,16 @@ async def chat(session_id: str, request: Request):
         _save_sessions(sessions)
 
     async def event_generator():
-        """把 agent.run_stream() 的 yield 包装成 SSE 事件"""
-        buffer = ""  # 攒一段再发
+        """把 agent.run_stream() 的 yield 包装成 SSE 事件
+
+        事件类型：
+        - thinking: [tool]/[tokens] 思考过程
+        - token: 模型输出正文
+        - done: 回复结束
+        - error: 错误信息
+        """
+        thinking_buffer = ""
+        text_buffer = ""
         try:
             for token in agent.run_stream(
                 user_input=user_message,
@@ -107,24 +116,37 @@ async def chat(session_id: str, request: Request):
             ):
                 if await request.is_disconnected():
                     break
+
                 if token == "[DONE]":
-                    # 把最后攒的也发出去
-                    if buffer:
-                        yield {"event": "token", "data": json.dumps({"text": buffer})}
-                        buffer = ""
+                    # 发完剩余 buffer
+                    if text_buffer:
+                        yield {"event": "token", "data": json.dumps({"text": text_buffer})}
+                    if thinking_buffer:
+                        yield {"event": "thinking", "data": json.dumps({"text": thinking_buffer})}
                     yield {"event": "done", "data": ""}
+                    break
+
+                if token.startswith("[tool]") or token.startswith("[tokens]"):
+                    # 思考过程：单独用 thinking 事件推送
+                    thinking_buffer += token + "\n"
+                    if text_buffer:
+                        yield {"event": "token", "data": json.dumps({"text": text_buffer})}
+                        text_buffer = ""
+                    yield {"event": "thinking", "data": json.dumps({"text": token})}
+                elif token.startswith("[ERROR]"):
+                    yield {"event": "error", "data": json.dumps({"error": token})}
                 else:
-                    buffer += token
-                    # 句子结束标点或超过 50 字则 flush
+                    # 正文文本
+                    text_buffer += token
                     if any(p in token for p in "。！？\n；\n"):
-                        yield {"event": "token", "data": json.dumps({"text": buffer})}
-                        buffer = ""
-                    elif len(buffer) >= 50:
-                        yield {"event": "token", "data": json.dumps({"text": buffer})}
-                        buffer = ""
+                        yield {"event": "token", "data": json.dumps({"text": text_buffer})}
+                        text_buffer = ""
+                    elif len(text_buffer) >= 50:
+                        yield {"event": "token", "data": json.dumps({"text": text_buffer})}
+                        text_buffer = ""
         except Exception as e:
-            if buffer:
-                yield {"event": "token", "data": json.dumps({"text": buffer})}
+            if text_buffer:
+                yield {"event": "token", "data": json.dumps({"text": text_buffer})}
             yield {"event": "error", "data": json.dumps({"error": str(e)})}
 
     return EventSourceResponse(event_generator())
@@ -132,4 +154,4 @@ async def chat(session_id: str, request: Request):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host=config.server.host, port=config.server.port)

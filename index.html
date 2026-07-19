@@ -60,6 +60,25 @@
     background: #1a1a3a; padding: 12px; border-radius: 8px; overflow-x: auto; margin: 8px 0;
   }
 
+  /* 思考过程折叠区 */
+  .thinking-fold {
+    margin-bottom: 8px; border-radius: 8px; overflow: hidden;
+    background: #1e1e38; border: 1px solid #2a2a5a;
+  }
+  .thinking-header {
+    padding: 6px 12px; cursor: pointer; user-select: none;
+    display: flex; align-items: center; gap: 6px;
+    font-size: 13px; color: #8888cc; transition: background 0.2s;
+  }
+  .thinking-header:hover { background: #2a2a5a; }
+  .thinking-arrow { font-size: 11px; transition: transform 0.2s; }
+  .thinking-arrow.collapsed { transform: rotate(-90deg); }
+  .thinking-content {
+    padding: 0 12px 8px; font-family: monospace; font-size: 13px;
+    color: #7777aa; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word;
+  }
+  .thinking-content.hidden { display: none; }
+
   /* 输入区域 */
   .input-area {
     padding: 16px 24px; border-top: 1px solid #2a2a4a; display: flex; gap: 12px;
@@ -142,6 +161,14 @@ function closeEventSource() {
   if (eventSource) { eventSource.close(); eventSource = null; }
 }
 
+// 切换思考过程折叠
+function toggleThinking(header) {
+  const content = header.nextElementSibling;
+  const arrow = header.querySelector('.thinking-arrow');
+  content.classList.toggle('hidden');
+  arrow.classList.toggle('collapsed');
+}
+
 // 发送消息
 async function send() {
   const input = document.getElementById('userInput');
@@ -153,11 +180,26 @@ async function send() {
 
   // 显示用户消息
   addMessage('user', msg);
-  // 添加 AI 消息容器（初始为空，SSE 逐步填充）
+  // 添加 AI 消息容器
   const aiDiv = addMessage('assistant', '');
+  // AI 消息内追加折叠区和正文容器
+  const thinkingFold = document.createElement('div');
+  thinkingFold.className = 'thinking-fold';
+  thinkingFold.style.display = 'none';
+  const thinkingHeader = document.createElement('div');
+  thinkingHeader.className = 'thinking-header';
+  thinkingHeader.onclick = function() { toggleThinking(this); };
+  thinkingHeader.innerHTML = '<span class="thinking-arrow">▾</span><span>🤔 思考过程</span>';
+  const thinkingContent = document.createElement('div');
+  thinkingContent.className = 'thinking-content';
+  thinkingFold.appendChild(thinkingHeader);
+  thinkingFold.appendChild(thinkingContent);
+  aiDiv.appendChild(thinkingFold);
 
-  // 用 EventSource 接收 SSE 流（需要先发起 POST，获取响应后用 EventSource 读）
-  // 注意：标准 EventSource 只支持 GET。我们用 fetch + ReadableStream 替代
+  const answerDiv = document.createElement('div');
+  answerDiv.className = 'answer-content';
+  aiDiv.appendChild(answerDiv);
+
   try {
     const response = await fetch(`/chat/${currentSession}`, {
       method: 'POST',
@@ -168,6 +210,7 @@ async function send() {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let currentEvent = '';
 
     while (true) {
       const { done, value } = await reader.read();
@@ -178,35 +221,58 @@ async function send() {
       buffer = lines.pop() || '';
 
       for (const line of lines) {
-        if (line.startsWith('event: token')) continue;
+        if (line.startsWith('event: ')) {
+          currentEvent = line.slice(7).trim();
+          continue;
+        }
         if (line.startsWith('data: ')) {
           const data = line.slice(6);
           if (data === '""' || data === '') continue;
           try {
             const parsed = JSON.parse(data);
-            if (parsed.text) {
-              aiDiv.textContent += parsed.text;
-              // 实时 Markdown 渲染
-              document.getElementById('messages').scrollTop =
-                document.getElementById('messages').scrollHeight;
+
+            if (currentEvent === 'thinking' && parsed.text) {
+              // 显示折叠区 + 追加思考内容
+              thinkingFold.style.display = '';
+              thinkingContent.textContent += parsed.text + '\n';
+              scrollToBottom();
+
+            } else if (currentEvent === 'token' && parsed.text) {
+              // 追加正文
+              answerDiv.textContent += parsed.text;
+              scrollToBottom();
+
+            } else if (currentEvent === 'error' && parsed.error) {
+              answerDiv.innerHTML = '⚠️ ' + parsed.error;
             }
           } catch (e) { /* 忽略非 JSON 行 */ }
         }
-        if (line.startsWith('event: done')) {
-          // 回复结束，最后渲染一次（剥离系统标签）
-          let finalText = aiDiv.textContent
+
+        if (currentEvent === 'done') {
+          // 最终渲染：正文转 Markdown，剥离残留标签
+          let finalText = answerDiv.textContent
             .replace(/\[SUMMARY\][\s\S]*?\[\/SUMMARY\]/g, '')
             .replace(/\[KEYWORDS\][\s\S]*?\[\/KEYWORDS\]/g, '')
             .replace(/\[\/?SUMMARY\]|\[\/?KEYWORDS\]/g, '');
-          aiDiv.innerHTML = marked.parse(finalText);
+          answerDiv.innerHTML = marked.parse(finalText);
+          // 默认折叠思考过程
+          if (thinkingFold.style.display !== 'none') {
+            thinkingContent.classList.add('hidden');
+            thinkingHeader.querySelector('.thinking-arrow').classList.add('collapsed');
+          }
         }
       }
     }
   } catch (e) {
-    aiDiv.textContent = '⚠️ 请求失败: ' + e.message;
+    answerDiv.textContent = '⚠️ 请求失败: ' + e.message;
   }
 
   document.getElementById('sendBtn').disabled = false;
+}
+
+function scrollToBottom() {
+  const msgs = document.getElementById('messages');
+  msgs.scrollTop = msgs.scrollHeight;
 }
 
 // 添加消息到界面

@@ -1,10 +1,15 @@
 import json
+import os
 import time
-import threading
 from typing import Optional
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 import chromadb
+from agent_config import config
+
+# 强制离线：模型已下载到本地缓存，不走网络请求
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
 
 # 短期记忆
@@ -12,9 +17,9 @@ import chromadb
 class ShortTermMemory:
     """滑动窗口短期记忆，固定保留最近 N 轮完整对话"""
 
-    MAX_ROUNDS = 8
+    MAX_ROUNDS = config.memory.short_term_max_rounds
 
-    def __init__(self, path: str = "agent_sessions.json"):
+    def __init__(self, path: str = config.memory.short_term_path):
         self.path = path
         self._sessions: dict[str, list[dict]] = {}
         self._load()
@@ -66,9 +71,9 @@ class ShortTermMemory:
 class MidTermMemory:
     """被淘汰轮次→单句摘要→合并摘要，常驻上下文（按 session 隔离）"""
 
-    MAX_ITEMS = 9
+    MAX_ITEMS = config.memory.mid_term_max_items
 
-    def __init__(self, client: OpenAI, path: str = "mid_term_memory.json"):
+    def __init__(self, client: OpenAI, path: str = config.memory.mid_term_path):
         self.client = client
         self.path = path
         self._data: dict[str, list[str]] = {}
@@ -91,7 +96,7 @@ class MidTermMemory:
     def archive_round(self, session_id: str, user_msg: str, assistant_msg: str):
         """淘汰一轮时调用：本地模型生成单句摘要"""
         try:
-            from local_llm import summarize
+            from core.local_llm import summarize
             summary = summarize(user_msg, assistant_msg)
         except Exception:
             summary = f"用户：{user_msg[:50]}… 助手：{assistant_msg[:50]}…"
@@ -120,8 +125,8 @@ class MidTermMemory:
 
     def _merge(self, session_id: str):
         summaries = self._data[session_id]
-        to_merge = summaries[:16]
-        self._data[session_id] = summaries[16:] + ["、".join(to_merge)]
+        to_merge = summaries[:config.memory.mid_term_merge_batch]
+        self._data[session_id] = summaries[config.memory.mid_term_merge_batch:] + ["、".join(to_merge)]
         self._save()
 
     def _rebuild_cache(self, session_id: str):
@@ -142,7 +147,6 @@ class LongTermMemory:
                  model: Optional[SentenceTransformer] = None):
         self._model = model
         self._model_provider = None
-        self._own_model = model is None
         self._client = chromadb.PersistentClient(path=db_path)
         try:
             self._collection = self._client.get_collection(collection_name)
@@ -158,7 +162,7 @@ class LongTermMemory:
     def _ensure_model(self):
         if self._model is None:
             try:
-                self._model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
+                self._model = SentenceTransformer(config.embedding.model_name, local_files_only=True)
             except Exception as e:
                 print(f"[memory] 模型加载失败，长期记忆归档跳过: {e}")
                 raise
@@ -169,24 +173,22 @@ class LongTermMemory:
                 self._model = self._model_provider()
             if self._model is None:
                 try:
-                    self._model = SentenceTransformer("BAAI/bge-small-zh-v1.5")
+                    self._model = SentenceTransformer(config.embedding.model_name, local_files_only=True)
                 except Exception as e:
                     print(f"[memory] 模型加载失败: {e}")
                     return
 
-        def _do():
-            try:
-                full_text = f"用户：{user_msg}\n助手：{assistant_msg}"
-                vec = self._model.encode(full_text)
-                self._collection.add(
-                    ids=[f"mem-{time.time_ns()}"],
-                    embeddings=[vec.tolist()],
-                    documents=[full_text],
-                    metadatas=[metadata or {"time": time.time()}],
-                )
-            except Exception as e:
-                print(f"[memory] 长期记忆归档失败: {e}")
-        threading.Thread(target=_do, daemon=True).start()
+        try:
+            full_text = f"用户：{user_msg}\n助手：{assistant_msg}"
+            vec = self._model.encode(full_text)
+            self._collection.add(
+                ids=[f"mem-{time.time_ns()}"],
+                embeddings=[vec.tolist()],
+                documents=[full_text],
+                metadatas=[metadata or {"time": time.time()}],
+            )
+        except Exception as e:
+            print(f"[memory] 长期记忆归档失败: {e}")
 
     def recall(self, query: str, n: int = 3) -> list[str]:
         self._ensure_model()

@@ -2,14 +2,11 @@ import os
 import chromadb
 import pickle
 from sentence_transformers import SentenceTransformer
+from agent_config import config
 
-
-_model = None
-def get_model():
-    return _model
 
 _collection = None
-db_path = "./rag_data"
+db_path = config.chroma.db_path
 _bm25_data = None
 _reranker = None
 
@@ -26,11 +23,8 @@ def _ensure_initialized():
         )
 
     print("🔄 [RAG] 首次加载嵌入模型...")
-    model_name = "BAAI/bge-small-zh-v1.5"
-    cache_path = os.path.join(
-        os.path.expanduser("~/.cache/huggingface/hub"),
-        f"models--{model_name.replace('/', '--')}"
-    )
+    model_name = config.embedding.model_name
+    cache_path = config.embedding.cache_path
     if os.path.exists(cache_path):
         _model = SentenceTransformer(model_name, local_files_only=True)
     else:
@@ -55,7 +49,7 @@ def rag_query(query: str) -> str:
     # 向量检索
     vector_results = _collection.query(
         query_embeddings=[q_vec.tolist()],
-        n_results=10,
+        n_results=config.rag.vector_top_k,
         include=["documents", "distances", "metadatas"],
     )
 
@@ -78,7 +72,7 @@ def rag_query(query: str) -> str:
     # RRF 合并排名
     rrf_scores = {}
     for rank, doc_text in enumerate(vector_results["documents"][0]):
-        rrf_scores[doc_text] = rrf_scores.get(doc_text, 0) + 1 / (60 + rank)
+        rrf_scores[doc_text] = rrf_scores.get(doc_text, 0) + 1 / (config.rag.rrf_constant + rank)
 
     if _bm25_data is not None:
         tokenized_query = query.split()
@@ -88,16 +82,16 @@ def rag_query(query: str) -> str:
         )[:10]
         for rank, (doc_id, _) in enumerate(bm25_top10):
             doc_text = _bm25_data["texts"][doc_id]
-            rrf_scores[doc_text] = rrf_scores.get(doc_text, 0) + 1 / (60 + rank)
+            rrf_scores[doc_text] = rrf_scores.get(doc_text, 0) + 1 / (config.rag.rrf_constant + rank)
 
     # 取 Top3
-    final_rank = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:5]
+    final_rank = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)[:config.rag.hybrid_top_k]
     useful = [text for text, _ in final_rank]
     if not useful:
         return "（未检索到相关信息）"
 
     # Rerank（数据量 > 1000 时启用）
-    if _bm25_data is not None and len(_bm25_data["texts"]) > 10:
+    if _bm25_data is not None and len(_bm25_data["texts"]) > config.rag.rerank_min_docs:
         _load_reranker()
         if _reranker is not None:
             pairs = [(query, text) for text in useful]
@@ -126,12 +120,12 @@ def _load_reranker():
     from sentence_transformers import CrossEncoder
     import torch
     print("🔄 [Rerank] 加载重排序模型（首次加载较慢）...")
-    model_name = "BAAI/bge-reranker-v2-m3"
+    model_name = config.rag.rerank_model
     cache_path = os.path.join(
         os.path.expanduser("~/.cache/huggingface/hub"),
         f"models--{model_name.replace('/', '--')}"
     )
-    kwargs = {"max_length": 512, "device": "cuda" if torch.cuda.is_available() else "cpu"}
+    kwargs = {"max_length": config.rag.rerank_max_length, "device": "cuda" if torch.cuda.is_available() else "cpu"}
     if os.path.exists(cache_path):
         _reranker = CrossEncoder(model_name, local_files_only=True, **kwargs)
     else:

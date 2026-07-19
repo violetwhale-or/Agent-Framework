@@ -2,3 +2,4 @@
 __pycache__/
 *.pyc
 .dockerignore
+Agent实际问题记录.md
