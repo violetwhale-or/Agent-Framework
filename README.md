@@ -7,23 +7,40 @@
 ```
 NN_text1/
 ├── .env                   # API 密钥（需自行创建）
-├── agentv2.py             # Agent 主体：MCP + 工具注册 + 流式生成器
-├── agent_sessions.json    # Agent 上下文存储，可以记录多会话记录并提供对话恢复基础
-├── build_knowledge.py     # 知识库构建：md 读取 → 切片 → 编码 → 向量库 + BM25 索引
+├── agent.py               # Agent v1（简单agent模式，终端入口）
+├── agentv2.py             # Agent v2（流式 + MCP + 记忆系统，终端入口）
+├── agent_config.py        # 全局配置中心（9 个子配置，支持环境变量覆盖）
+├── agent_sessions.json    # 会话持久化存储
+├── chat.py                # 终端聊天工具（纯对话演示demo）
 ├── docker-compose.yml     # 一键部署
 ├── Dockerfile             # 容器化镜像
-├── index.html             # Web 聊天页面：深色主题、多会话切换
-├── local_llm.py           # 本地 Qwen2.5-1.5B (4-bit)：任务分类 + 对话摘要
-├── mcp_client.py          # MCP 客户端：同步 subprocess，手动 JSON-RPC
-├── mcp_manager.py         # MCP 管理器：多服务器发现、前缀路由
-├── memory.py              # 三级记忆：短期8轮滑动窗口 + 中期摘要 + 长期ChromaDB
-├── rag_data/              # 本地知识库，使用 build_knowledge.py 构建
-├── rag_tool.py            # RAG 检索：混合检索（语义+BM25）+ RRF 合并
-├── README.md              # 项目说明
+├── feishu_bot.py          # 飞书机器人入口
+├── index.html             # Web 聊天页面
 ├── requirements.txt       # Python 依赖
-├── server.py              # FastAPI 服务：SSE 流式端点、多会话管理
-├── sessions_index.json    # 界面多会话分支存储：提供本地多对话记录、恢复基础
-└── tools.py               # ToolRegistry + 工具函数 + SessionStore + SubagentPool + SemanticCache
+├── README.md              # 项目必读
+├── server.py              # FastAPI 服务（SSE 流式 + 多会话管理）
+├── sessions_index.json    # 多会话索引
+│
+├── core/                  # ⚙️ 核心引擎
+│   ├── tools.py           #   ToolRegistry + 工具函数 + SessionStore + SubagentPool + SemanticCache
+│   ├── memory.py          #   三级记忆：短期滑动窗口 + 中期摘要 + 长期 ChromaDB
+│   └── local_llm.py       #   本地 Qwen2.5-1.5B (4-bit)：任务分类 + 对话摘要
+│
+├── mcp/                   # 🔌 MCP 协议
+│   ├── client.py          #   MCP 客户端：同步 subprocess，JSON-RPC
+│   └── manager.py         #   MCP 管理器：多服务器发现、前缀路由
+│
+├── rag/                   # 📚 RAG 知识库
+│   ├── build_knowledge.py #   知识库构建：md 读取 → 切片 → 编码 → 向量库 + BM25
+│   ├── rag_tool.py        #   混合检索：语义 + BM25 + RRF 合并 + 重排序
+│   ├── eval_rag.py        #   检索评估：向量 vs 混合检索对比
+│   └── inspect_kb.py      #   知识库内容查看
+│
+├── channels/              # 📨 消息通道
+│   ├── base_channel.py    #   抽象基类
+│   └── feishu_channel.py  #   飞书适配器（WebSocket）
+│
+└── rag_data/              # 知识库数据（ChromaDB + BM25 索引）
 ```
 
 ### 架构流程
@@ -99,7 +116,8 @@ graph LR
 
 ### Web 界面（server.py + index.html）
 
-- **FastAPI 服务**：SSE 流式推送，缓冲区机制（标点断句 / 50 字兜底）
+- **FastAPI 服务**：SSE 流式推送，`[tool]`/`[tokens]` 走独立 thinking 事件
+- **思考过程折叠**：工具调用信息以浅灰色折叠框展示，回复完成后自动收起，点击展开查看
 - **深色主题**：Markdown 渲染、多会话切换、对话历史保留
 - 访问 `http://localhost:8000`
 
@@ -130,7 +148,9 @@ pip install -r requirements.txt
 export HF_ENDPOINT=https://hf-mirror.com
 
 # 从 .md 文档构建知识库
-python build_knowledge.py RAG_learning/Qwen-Proxy.md
+python rag/build_knowledge.py RAG_learning/Qwen-Proxy.md
+# 或构建整个目录
+python rag/build_knowledge.py ./docs/
 ```
 
 产物存储在 `./rag_data/`（chroma.sqlite3 + bm25_index.pkl）。后续再次启动 agent 时自动加载。
@@ -180,25 +200,33 @@ docker compose up -d
 ```bash
 # 方法一：宿主机有 Python 环境时直接构建
 export HF_ENDPOINT=https://hf-mirror.com
-python build_knowledge.py ./docs/
+python rag/build_knowledge.py ./docs/
 
 # 方法二：通过容器构建（宿主机无需 Python）
 docker compose run --rm \
   -v ./docs:/app/docs \
   -v ./rag_data:/app/rag_data \
   -e HF_ENDPOINT=https://hf-mirror.com \
-  agent python build_knowledge.py /app/docs/
+  agent python rag/build_knowledge.py /app/docs/
 ```
 
 ### 5. 检索效果评估
 
 ```bash
-python eval_rag.py
+python rag/eval_rag.py
 ```
 
 输出 Recall@K 指标。
 
-### 6. 对话控制命令
+### 6. 飞书机器人模式
+
+```bash
+python feishu_bot.py
+```
+
+需配置飞书应用凭证（`FEISHU_APP_ID` + `FEISHU_APP_SECRET`），通过 WebSocket 长连接接收消息并回复（富文本格式）。
+
+### 7. 对话控制命令
 
 在对话中输入以下命令控制 Agent 行为：
 
@@ -208,14 +236,14 @@ python eval_rag.py
 | `/mcp off` | 禁用 MCP 工具，切换为本地工具 |
 | `/help` 或 `/h` | 显示可用命令列表 |
 
-### 7. 本地 LLM（可选）
+### 8. 本地 LLM（可选）
 
 首次运行 agent 时会自动下载 Qwen2.5-1.5B-Instruct 4-bit 量化模型（~750MB）。
 也可手动下载：
 
 ```bash
 export HF_ENDPOINT=https://hf-mirror.com
-python -c "from local_llm import classify; print(classify('test'))"
+python -c "from core.local_llm import classify; print(classify('test'))"
 ```
 
 下载完成后设置离线模式：
@@ -235,18 +263,60 @@ python agentv2.py
 DEEPSEEK_API_KEY=sk-your-key-here
 ```
 
+### 配置覆盖（可选）
+
+`agent_config.py` 中的全部配置项可通过 `AGENT__{key}` 环境变量覆盖，无需修改代码：
+
+```bash
+# 覆盖 LLM 地址
+export AGENT__LLM_BASE_URL=https://custom.endpoint
+
+# 覆盖知识库路径
+export AGENT__DB_PATH=./my_rag_data
+
+# 覆盖服务端口
+export AGENT__SERVER_PORT=9000
+
+# 覆盖模型名
+export AGENT__EMBEDDING_MODEL_NAME=BAAI/bge-large-zh-v1.5
+
+# 覆盖最大对话轮次
+export AGENT__MAX_TURNS=30
+```
+
 ## 已知待改进项
 
 - 语义缓存的 `_embed()` 使用空格分词，对中文效果差
-- 无成本追踪（未记录每次 API 调用的 token 用量）
 - Rerank 尚未默认启用（需要数据量 > 1000 条或手动开启）
 - MCP 的 `readline()` 无超时机制
+- BM25 中文分词依赖 jieba 库，需单独安装
+- Docker 镜像体积偏大（~2GB），可考虑多阶段构建
 
 ---
 
 ## 版本记录
 
-### v2.4 — 本地 LLM + 三级记忆（当前版本）
+### v2.5 — 飞书接入 + 全局配置 + 分文件夹管理（当前版本）
+
+**新增渠道：**
+- 飞书机器人正式接入：通过 WebSocket 长连接与飞书通信，支持私聊与群聊
+- 飞书消息支持富文本（`post`）格式：代码块分段展示、粗体保留、行内代码反引号标记，告别纯文本扁平显示
+- 消息通道抽象：`channels/` 目录下定义 `BaseChannel` 基类 + `FeishuChannel` 适配器，便于后续扩展更多消息渠道
+
+**功能改进：**
+- Web 前端思考过程折叠：`[tool]`/`[tokens]` 信息以浅灰色折叠框单独展示，回复完成后自动收起，点击展开查看详细思考过程，正文区域更清爽
+- BM25 中文分词升级（空格 split → jieba 分词），中英文混合文档检索准确率显著提升
+
+**架构调整：**
+- 代码分文件夹管理：核心引擎移至 `core/`，MCP 协议移至 `mcp/`，RAG 知识库移至 `rag/`，入口文件保留在根目录，结构更清晰
+- 新建 `agent_config.py` 全局配置中心，统一管理 LLM、Embedding、Chroma、RAG、Memory、Cache、Tool、Server、Billing 共 9 类配置项，支持 `AGENT__xxx` 环境变量覆盖
+
+**依赖新增：**
+- `jieba>=0.42.1` — BM25 中文分词
+
+---
+
+### v2.4 — 本地 LLM + 三级记忆
 
 **新增文件：**
 - `local_llm.py` — Qwen2.5-1.5B 4-bit 量化封装（任务分类 + 对话摘要）
