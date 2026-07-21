@@ -177,7 +177,7 @@ python server.py
 
 ```bash
 # 拉取镜像
-docker pull violet/dev_agent:0.1.1
+docker pull violet/dev_agent:0.1.2
 
 # 准备数据目录
 mkdir -p ./rag_data
